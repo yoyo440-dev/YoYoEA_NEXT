@@ -122,7 +122,7 @@ void LogEntry(const StrategyState &state,
               const double indicatorValue)
   {
    int handle = FileOpen(g_logFileName,
-                         FILE_CSV | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_APPEND,
+                         FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                          ',');
    if(handle == INVALID_HANDLE)
      {
@@ -131,6 +131,7 @@ void LogEntry(const StrategyState &state,
      }
 
    string directionText = (direction > 0 ? "BUY" : "SELL");
+   FileSeek(handle, 0, SEEK_END);
    FileWrite(handle,
              TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
              Symbol(),
@@ -299,7 +300,7 @@ int EvaluateMACD(double &indicatorValue)
 //+------------------------------------------------------------------+
 void ProcessStrategy(StrategyIndex index, const double atrValue)
   {
-   StrategyState &state = g_strategies[index];
+   StrategyState state = g_strategies[index];
    if(!state.enabled)
       return;
 
@@ -343,6 +344,7 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
      {
       state.lastBarTime  = signalBarTime;
       state.lastDirection = direction;
+      g_strategies[index] = state;
      }
   }
 

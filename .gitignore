@@ -6,6 +6,9 @@ MQL4/Experts/logs/
 MQL4/Experts/*.ex4
 MQL4/Indicators/*.ex4
 MQL4/Scripts/*.ex4
+YoYoEA_NEXT/MQL4/Experts/*.ex4
+YoYoEA_NEXT/MQL4/Indicators/*.ex4
+YoYoEA_NEXT/MQL4/Scripts/*.ex4
 
 # Strategy Tester outputs
 tester/
