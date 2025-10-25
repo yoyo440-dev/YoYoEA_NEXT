@@ -13,6 +13,7 @@ input bool   InpEnableMA        = true;
 input bool   InpEnableRSI       = true;
 input bool   InpEnableCCI       = true;
 input bool   InpEnableMACD      = true;
+input bool   InpEnableStoch     = true;
 
 input int    InpATRPeriod       = 14;
 
@@ -32,6 +33,12 @@ input int    InpMACDFastEMA     = 12;
 input int    InpMACDSlowEMA     = 26;
 input int    InpMACDSignalSMA   = 9;
 
+input int    InpStochKPeriod    = 14;
+input int    InpStochDPeriod    = 3;
+input int    InpStochSlowing    = 3;
+input double InpStochBuyLevel   = 20.0;
+input double InpStochSellLevel  = 80.0;
+
 //--- strategy meta definitions
 enum StrategyIndex
   {
@@ -39,6 +46,7 @@ enum StrategyIndex
    STRAT_RSI,
    STRAT_CCI,
    STRAT_MACD,
+   STRAT_STOCH,
    STRAT_TOTAL
   };
 
@@ -534,6 +542,31 @@ int EvaluateMACD(double &indicatorValue)
   }
 
 //+------------------------------------------------------------------+
+//| Evaluate Stochastic cross                                        |
+//+------------------------------------------------------------------+
+int EvaluateStochastic(double &indicatorValue)
+  {
+   int requiredBars = MathMax(InpStochKPeriod, MathMax(InpStochDPeriod, InpStochSlowing)) + 2;
+   if(Bars < requiredBars)
+      return(0);
+
+   double kPrev = iStochastic(NULL, 0, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH, MODE_MAIN, 2);
+   double dPrev = iStochastic(NULL, 0, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH, MODE_SIGNAL, 2);
+   double kCurr = iStochastic(NULL, 0, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH, MODE_MAIN, 1);
+   double dCurr = iStochastic(NULL, 0, InpStochKPeriod, InpStochDPeriod, InpStochSlowing, MODE_SMA, STO_LOWHIGH, MODE_SIGNAL, 1);
+
+   indicatorValue = kCurr;
+
+   if(kPrev <= dPrev && kCurr > dCurr && kCurr < InpStochBuyLevel && dCurr < InpStochBuyLevel)
+      return(1);
+
+   if(kPrev >= dPrev && kCurr < dCurr && kCurr > InpStochSellLevel && dCurr > InpStochSellLevel)
+      return(-1);
+
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
 //| Process individual strategy                                      |
 //+------------------------------------------------------------------+
 void ProcessStrategy(StrategyIndex index, const double atrValue)
@@ -558,6 +591,9 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
          break;
       case STRAT_MACD:
          direction = EvaluateMACD(indicatorValue);
+         break;
+      case STRAT_STOCH:
+         direction = EvaluateStochastic(indicatorValue);
          break;
      }
 
@@ -592,6 +628,8 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
 void CheckClosedOrders()
   {
    int total = OrdersHistoryTotal();
+   bool processedNew = false;
+
    for(int i = total - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
@@ -607,7 +645,11 @@ void CheckClosedOrders()
 
       int ticket = OrderTicket();
       if(IsExitLogged(ticket))
+        {
+         if(!processedNew)
+            break;
          continue;
+        }
 
       datetime closeTime = OrderCloseTime();
       if(closeTime == 0)
@@ -653,6 +695,7 @@ void CheckClosedOrders()
                     closeTime);
 
       MarkExitLogged(ticket);
+      processedNew = true;
      }
   }
 
@@ -703,6 +746,18 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
      }
 
+   if(InpStochKPeriod <= 0 || InpStochDPeriod <= 0 || InpStochSlowing <= 0)
+     {
+      Print("Stochastic parameters must be greater than zero.");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   if(InpStochBuyLevel < 0.0 || InpStochSellLevel > 100.0 || InpStochBuyLevel >= InpStochSellLevel)
+     {
+      Print("Stochastic levels must satisfy 0 <= BuyLevel < SellLevel <= 100.");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
    g_strategies[STRAT_MA].name  = "MA_CROSS";
    g_strategies[STRAT_MA].comment = "MA";
    g_strategies[STRAT_MA].magic = 10101;
@@ -730,6 +785,13 @@ int OnInit()
    g_strategies[STRAT_MACD].enabled = InpEnableMACD;
    g_strategies[STRAT_MACD].lastBarTime = 0;
    g_strategies[STRAT_MACD].lastDirection = 0;
+
+   g_strategies[STRAT_STOCH].name  = "STOCH";
+   g_strategies[STRAT_STOCH].comment = "STOCH";
+   g_strategies[STRAT_STOCH].magic = 10501;
+   g_strategies[STRAT_STOCH].enabled = InpEnableStoch;
+   g_strategies[STRAT_STOCH].lastBarTime = 0;
+   g_strategies[STRAT_STOCH].lastDirection = 0;
 
    g_profileLabel = StringTrimLeft(StringTrimRight(InpProfileName));
    if(StringLen(g_profileLabel) == 0)
@@ -783,6 +845,7 @@ void OnTick()
    ProcessStrategy(STRAT_RSI, atrValue);
    ProcessStrategy(STRAT_CCI, atrValue);
    ProcessStrategy(STRAT_MACD, atrValue);
+   ProcessStrategy(STRAT_STOCH, atrValue);
 
    CheckClosedOrders();
   }
