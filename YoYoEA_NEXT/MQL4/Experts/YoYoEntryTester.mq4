@@ -14,6 +14,7 @@ input bool   InpEnableRSI       = true;
 input bool   InpEnableCCI       = true;
 input bool   InpEnableMACD      = true;
 input bool   InpEnableStoch     = true;
+input bool   InpUseATRStops     = false;
 
 input int    InpATRPeriod       = 14;
 
@@ -38,6 +39,9 @@ input int    InpStochDPeriod    = 3;
 input int    InpStochSlowing    = 3;
 input double InpStochBuyLevel   = 20.0;
 input double InpStochSellLevel  = 80.0;
+
+input double InpATRStopMultiplier      = 3.0;
+input double InpATRTakeProfitMultiplier = 2.0;
 
 //--- strategy meta definitions
 enum StrategyIndex
@@ -394,18 +398,43 @@ bool ExecuteEntry(const StrategyState &state,
    double sl = 0.0;
    double tp = 0.0;
 
-   if(InpStopLossPips > 0)
+   if(InpUseATRStops)
      {
-      double dist = InpStopLossPips * pip;
-      sl = (cmd == OP_BUY ? price - dist : price + dist);
-      sl = NormalizeDouble(sl, Digits);
-     }
+      if(atrValue <= 0.0)
+        {
+         Print("ATR value unavailable for ATR-based stops. Trade skipped for ", state.name);
+         return(false);
+        }
 
-   if(InpTakeProfitPips > 0)
+      if(InpATRStopMultiplier > 0.0)
+        {
+         double dist = atrValue * InpATRStopMultiplier;
+         sl = (cmd == OP_BUY ? price - dist : price + dist);
+         sl = NormalizeDouble(sl, Digits);
+        }
+
+      if(InpATRTakeProfitMultiplier > 0.0)
+        {
+         double dist = atrValue * InpATRTakeProfitMultiplier;
+         tp = (cmd == OP_BUY ? price + dist : price - dist);
+         tp = NormalizeDouble(tp, Digits);
+        }
+     }
+   else
      {
-      double dist = InpTakeProfitPips * pip;
-      tp = (cmd == OP_BUY ? price + dist : price - dist);
-      tp = NormalizeDouble(tp, Digits);
+      if(InpStopLossPips > 0)
+        {
+         double dist = InpStopLossPips * pip;
+         sl = (cmd == OP_BUY ? price - dist : price + dist);
+         sl = NormalizeDouble(sl, Digits);
+        }
+
+      if(InpTakeProfitPips > 0)
+        {
+         double dist = InpTakeProfitPips * pip;
+         tp = (cmd == OP_BUY ? price + dist : price - dist);
+         tp = NormalizeDouble(tp, Digits);
+        }
      }
 
    string comment = state.comment;
@@ -756,6 +785,21 @@ int OnInit()
      {
       Print("Stochastic levels must satisfy 0 <= BuyLevel < SellLevel <= 100.");
       return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   if(InpUseATRStops)
+     {
+      if(InpATRStopMultiplier < 0.0 || InpATRTakeProfitMultiplier < 0.0)
+        {
+         Print("ATR multipliers must be zero or positive when ATR stops are enabled.");
+         return(INIT_PARAMETERS_INCORRECT);
+        }
+
+      if(InpATRStopMultiplier == 0.0 && InpATRTakeProfitMultiplier == 0.0)
+        {
+         Print("At least one ATR multiplier must be greater than zero when ATR stops are enabled.");
+         return(INIT_PARAMETERS_INCORRECT);
+        }
      }
 
    g_strategies[STRAT_MA].name  = "MA_CROSS";
