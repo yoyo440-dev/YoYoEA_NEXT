@@ -1,0 +1,18 @@
+# MetaTrader 4 generated files
+MQL4/Logs/
+MQL4/Files/
+MQL4/Tester/
+MQL4/Experts/logs/
+MQL4/Experts/*.ex4
+MQL4/Indicators/*.ex4
+MQL4/Scripts/*.ex4
+
+# Strategy Tester outputs
+tester/
+History/
+*.hst
+*.fxt
+
+# Miscellaneous binaries and logs
+*.log
+*.tmp
