@@ -55,6 +55,10 @@ struct StrategyState
 StrategyState g_strategies[STRAT_TOTAL];
 string        g_logFileName;
 string        g_profileLabel;
+string        g_resultLogFileName;
+int           g_exitLoggedTickets[];
+
+#define RESULT_LOG_COLUMNS 16
 
 //+------------------------------------------------------------------+
 //| Utility: sanitise profile name for file usage                    |
@@ -109,7 +113,7 @@ bool HasOpenPosition(const StrategyState &state)
          return(true);
      }
    return(false);
-  }
+}
 
 //+------------------------------------------------------------------+
 //| Utility: write entry info to CSV log                             |
@@ -142,6 +146,226 @@ void LogEntry(const StrategyState &state,
              DoubleToString(price, Digits),
              DoubleToString(atrValue, 6),
              DoubleToString(indicatorValue, 6));
+   FileClose(handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: find strategy index by magic number                     |
+//+------------------------------------------------------------------+
+int FindStrategyIndexByMagic(const int magic)
+  {
+   for(int i = 0; i < STRAT_TOTAL; i++)
+     {
+      if(g_strategies[i].magic == magic)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: ensure result log header exists                         |
+//+------------------------------------------------------------------+
+bool EnsureResultLogHeader()
+  {
+   int handle = FileOpen(g_resultLogFileName,
+                         FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         ',');
+   if(handle == INVALID_HANDLE)
+     {
+      handle = FileOpen(g_resultLogFileName,
+                        FILE_CSV | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        ',');
+      if(handle == INVALID_HANDLE)
+        {
+         Print("Failed to create result log file ", g_resultLogFileName,
+               ". Error: ", GetLastError());
+         return(false);
+        }
+      FileWrite(handle,
+                "timestamp",
+                "event",
+                "symbol",
+                "profile",
+                "strategy",
+                "direction",
+                "ticket",
+                "volume",
+                "price",
+                "atr",
+                "indicator",
+                "profit",
+                "swap",
+                "commission",
+                "net",
+                "pips");
+      FileClose(handle);
+      return(true);
+     }
+
+   if(FileSize(handle) == 0)
+     {
+      FileWrite(handle,
+                "timestamp",
+                "event",
+                "symbol",
+                "profile",
+                "strategy",
+                "direction",
+                "ticket",
+                "volume",
+                "price",
+                "atr",
+                "indicator",
+                "profit",
+                "swap",
+                "commission",
+                "net",
+                "pips");
+     }
+   FileClose(handle);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: load previously logged exit tickets                     |
+//+------------------------------------------------------------------+
+void LoadLoggedExitTickets()
+  {
+   ArrayResize(g_exitLoggedTickets, 0);
+
+    int handle = FileOpen(g_resultLogFileName,
+                          FILE_CSV | FILE_READ | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          ',');
+   if(handle == INVALID_HANDLE)
+      return;
+
+   if(FileSize(handle) == 0)
+     {
+      FileClose(handle);
+      return;
+     }
+
+   for(int i = 0; i < RESULT_LOG_COLUMNS && !FileIsEnding(handle); i++)
+      FileReadString(handle);
+
+   while(!FileIsEnding(handle))
+     {
+      string fields[RESULT_LOG_COLUMNS];
+      bool   rowComplete = true;
+      for(int col = 0; col < RESULT_LOG_COLUMNS; col++)
+        {
+         if(FileIsEnding(handle))
+           {
+            rowComplete = false;
+            break;
+           }
+         fields[col] = FileReadString(handle);
+        }
+
+      if(!rowComplete)
+         break;
+
+      if(StringLen(fields[0]) == 0 && StringLen(fields[1]) == 0)
+         continue;
+
+      if(fields[1] == "EXIT")
+        {
+         int ticket = (int)StringToInteger(fields[6]);
+         int size   = ArraySize(g_exitLoggedTickets);
+         ArrayResize(g_exitLoggedTickets, size + 1);
+         g_exitLoggedTickets[size] = ticket;
+        }
+     }
+
+   FileClose(handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: check if exit already logged                            |
+//+------------------------------------------------------------------+
+bool IsExitLogged(const int ticket)
+  {
+   for(int i = 0; i < ArraySize(g_exitLoggedTickets); i++)
+     {
+      if(g_exitLoggedTickets[i] == ticket)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: mark exit ticket as logged                              |
+//+------------------------------------------------------------------+
+void MarkExitLogged(const int ticket)
+  {
+   int size = ArraySize(g_exitLoggedTickets);
+   ArrayResize(g_exitLoggedTickets, size + 1);
+   g_exitLoggedTickets[size] = ticket;
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: log trade events with PnL information                   |
+//+------------------------------------------------------------------+
+void LogTradeEvent(const StrategyState &state,
+                   const string eventType,
+                   const int direction,
+                   const int ticket,
+                   const double volume,
+                   const double price,
+                   const double atrValue,
+                   const double indicatorValue,
+                   const double profit,
+                   const double swapValue,
+                   const double commissionValue,
+                   const double netProfit,
+                   const double pipsValue,
+                   const datetime eventTime)
+  {
+   int handle = FileOpen(g_resultLogFileName,
+                         FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         ',');
+   if(handle == INVALID_HANDLE)
+     {
+      Print("Failed to open result log file ", g_resultLogFileName,
+            ". Error: ", GetLastError());
+      return;
+     }
+
+   FileSeek(handle, 0, SEEK_END);
+
+   string directionText = "";
+   if(direction > 0)
+      directionText = "BUY";
+   else if(direction < 0)
+      directionText = "SELL";
+
+   string priceText      = (price == EMPTY_VALUE ? "" : DoubleToString(price, Digits));
+   string atrText        = (atrValue == EMPTY_VALUE ? "" : DoubleToString(atrValue, 6));
+   string indicatorText  = (indicatorValue == EMPTY_VALUE ? "" : DoubleToString(indicatorValue, 6));
+   string profitText     = (profit == EMPTY_VALUE ? "" : DoubleToString(profit, 2));
+   string swapText       = (swapValue == EMPTY_VALUE ? "" : DoubleToString(swapValue, 2));
+   string commissionText = (commissionValue == EMPTY_VALUE ? "" : DoubleToString(commissionValue, 2));
+   string netText        = (netProfit == EMPTY_VALUE ? "" : DoubleToString(netProfit, 2));
+   string pipsText       = (pipsValue == EMPTY_VALUE ? "" : DoubleToString(pipsValue, 1));
+
+   FileWrite(handle,
+             TimeToString(eventTime, TIME_DATE | TIME_SECONDS),
+             eventType,
+             Symbol(),
+             g_profileLabel,
+             state.name,
+             directionText,
+             IntegerToString(ticket),
+             DoubleToString(volume, 2),
+             priceText,
+             atrText,
+             indicatorText,
+             profitText,
+             swapText,
+             commissionText,
+             netText,
+             pipsText);
+
    FileClose(handle);
   }
 
@@ -200,6 +424,20 @@ bool ExecuteEntry(const StrategyState &state,
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
       LogEntry(state, direction, ticket, OrderOpenPrice(), atrValue, indicatorValue);
+      LogTradeEvent(state,
+                    "ENTRY",
+                    direction,
+                    ticket,
+                    OrderLots(),
+                    OrderOpenPrice(),
+                    atrValue,
+                    indicatorValue,
+                    EMPTY_VALUE,
+                    EMPTY_VALUE,
+                    EMPTY_VALUE,
+                    EMPTY_VALUE,
+                    EMPTY_VALUE,
+                    OrderOpenTime());
      }
    else
      {
@@ -349,6 +587,76 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
   }
 
 //+------------------------------------------------------------------+
+//| Check newly closed orders to log PnL                             |
+//+------------------------------------------------------------------+
+void CheckClosedOrders()
+  {
+   int total = OrdersHistoryTotal();
+   for(int i = total - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
+         continue;
+
+      if(OrderSymbol() != Symbol())
+         continue;
+
+      int magic = OrderMagicNumber();
+      int stratIndex = FindStrategyIndexByMagic(magic);
+      if(stratIndex < 0)
+         continue;
+
+      int ticket = OrderTicket();
+      if(IsExitLogged(ticket))
+         continue;
+
+      datetime closeTime = OrderCloseTime();
+      if(closeTime == 0)
+         continue;
+
+      int direction = 0;
+      if(OrderType() == OP_BUY)
+         direction = 1;
+      else if(OrderType() == OP_SELL)
+         direction = -1;
+
+      double volume     = OrderLots();
+      double closePrice = OrderClosePrice();
+      double atrValue   = iATR(NULL, 0, InpATRPeriod, 0);
+      double profit     = OrderProfit();
+      double swapValue  = OrderSwap();
+      double commission = OrderCommission();
+      double netProfit  = profit + swapValue + commission;
+
+      double pipValue = EMPTY_VALUE;
+      double pipSize  = PipSize();
+      if(pipSize > 0)
+        {
+         double diff = OrderClosePrice() - OrderOpenPrice();
+         pipValue = diff / pipSize;
+         if(direction < 0)
+            pipValue = -pipValue;
+        }
+
+      LogTradeEvent(g_strategies[stratIndex],
+                    "EXIT",
+                    direction,
+                    ticket,
+                    volume,
+                    closePrice,
+                    atrValue,
+                    EMPTY_VALUE,
+                    profit,
+                    swapValue,
+                    commission,
+                    netProfit,
+                    pipValue,
+                    closeTime);
+
+      MarkExitLogged(ticket);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -429,6 +737,7 @@ int OnInit()
 
    string safeProfile = SanitiseProfileName(InpProfileName);
    g_logFileName      = "EntryLog_" + safeProfile + ".csv";
+   g_resultLogFileName = "TradeLog_" + safeProfile + ".csv";
 
    int handle = FileOpen(g_logFileName,
                          FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -450,9 +759,12 @@ int OnInit()
      }
    else
      {
-      Print("Failed to initialise log file ", g_logFileName,
-            ". Error: ", GetLastError());
+     Print("Failed to initialise log file ", g_logFileName,
+           ". Error: ", GetLastError());
      }
+
+   EnsureResultLogHeader();
+   LoadLoggedExitTickets();
 
    return(INIT_SUCCEEDED);
   }
@@ -471,6 +783,8 @@ void OnTick()
    ProcessStrategy(STRAT_RSI, atrValue);
    ProcessStrategy(STRAT_CCI, atrValue);
    ProcessStrategy(STRAT_MACD, atrValue);
+
+   CheckClosedOrders();
   }
 
 //+------------------------------------------------------------------+
