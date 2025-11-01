@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.00"
+#property version   "1.20"
 #property description "Entry evaluation EA for MA, RSI, CCI, and MACD strategies."
 
 //--- input parameters
@@ -44,6 +44,25 @@ input double InpStochSellLevel  = 80.0;
 
 input double InpATRStopMultiplier      = 3.0;
 input double InpATRTakeProfitMultiplier = 2.0;
+input double InpMaxSpreadPips          = 0.0;
+input bool   InpUseRiskBasedLots       = false;
+input double InpRiskPercent            = 1.0;
+input int    InpCooldownMinutes        = 0;
+input int    InpLossStreakPause        = 0;
+input int    InpLossPauseMinutes       = 0;
+input bool   InpAllowOppositePositions = false;
+input bool   InpUseTradingSessions     = false;
+input int    InpSessionStartHour       = 0;
+input int    InpSessionEndHour         = 24;
+input bool   InpSessionSkipFriday      = false;
+input int    InpFridayCutoffHour       = 21;
+input bool   InpEnableBreakEven        = false;
+input double InpBreakEvenAtrTrigger    = 1.0;
+input int    InpBreakEvenOffsetPips    = 0;
+input bool   InpEnableAtrTrailing      = false;
+input double InpTrailingAtrTrigger     = 1.5;
+input double InpTrailingAtrStep        = 1.0;
+input int    InpTrailingMinStepPips    = 1;
 
 //--- strategy meta definitions
 enum StrategyIndex
@@ -64,6 +83,9 @@ struct StrategyState
    bool     enabled;
    datetime lastBarTime;
    int      lastDirection; // 1 = buy, -1 = sell, 0 = none
+   datetime lastTradeTime;
+   int      lossStreak;
+   datetime lossPauseUntil;
   };
 
 StrategyState g_strategies[STRAT_TOTAL];
@@ -79,6 +101,13 @@ enum StopMode
    STOP_MODE_GLOBAL = 0,
    STOP_MODE_ATR,
    STOP_MODE_PIPS
+  };
+
+enum TradeAttemptResult
+  {
+   TRADE_ATTEMPT_SKIPPED = 0,
+   TRADE_ATTEMPT_PLACED,
+   TRADE_ATTEMPT_CONSUMED
   };
 
 struct StrategyBandSetting
@@ -102,6 +131,7 @@ struct BandConfig
 BandConfig g_bandConfigs[];
 bool       g_bandConfigLoaded = false;
 string     g_bandConfigPath   = "";
+string     g_strategyCsvPrefixes[] = {"MA", "RSI", "CCI", "MACD", "STOCH"};
 
 //+------------------------------------------------------------------+
 //| Utility: sanitise profile name for file usage                    |
@@ -143,6 +173,258 @@ double PipSize()
   }
 
 //+------------------------------------------------------------------+
+//| Utility: derive decimal digits for a lot step                    |
+//+------------------------------------------------------------------+
+int StepToDigits(const double step)
+  {
+   if(step <= 0.0)
+      return(2);
+
+   double scaled = step;
+   int    digits = 0;
+
+   while(digits < 8 && MathAbs(MathRound(scaled) - scaled) > 1e-8)
+     {
+      scaled *= 10.0;
+      digits++;
+     }
+
+   if(digits < 0)
+      digits = 0;
+   if(digits > 8)
+      digits = 8;
+
+   return(digits);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: normalize requested lot size                           |
+//+------------------------------------------------------------------+
+double NormalizeLotSize(const double requestedLots)
+  {
+   double lotStep = MarketInfo(Symbol(), MODE_LOTSTEP);
+   double minLot  = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot  = MarketInfo(Symbol(), MODE_MAXLOT);
+
+   double normalized = requestedLots;
+
+   if(normalized < 0.0)
+      normalized = 0.0;
+
+   if(maxLot > 0.0 && normalized > maxLot)
+      normalized = maxLot;
+
+   if(minLot > 0.0 && normalized < minLot)
+      normalized = minLot;
+
+   if(lotStep > 0.0)
+     {
+      int stepDigits = StepToDigits(lotStep);
+      double rawSteps = (normalized - minLot) / lotStep;
+      if(rawSteps < 0.0)
+         rawSteps = 0.0;
+      double steps = MathFloor(rawSteps + 1e-8);
+
+      normalized = minLot + steps * lotStep;
+      normalized = NormalizeDouble(normalized, stepDigits);
+     }
+   else
+     {
+      normalized = NormalizeDouble(normalized, 2);
+     }
+
+   if(minLot > 0.0 && normalized < minLot)
+      normalized = NormalizeDouble(minLot, 2);
+   if(maxLot > 0.0 && normalized > maxLot)
+      normalized = NormalizeDouble(maxLot, 2);
+
+   return(normalized);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: calculate current spread in pips                        |
+//+------------------------------------------------------------------+
+double CurrentSpreadPips()
+  {
+   double spreadPoints = MarketInfo(Symbol(), MODE_SPREAD);
+   double point        = MarketInfo(Symbol(), MODE_POINT);
+   double pip          = PipSize();
+
+   if(pip <= 0.0)
+      return(0.0);
+
+   double priceSpread = spreadPoints * point;
+   return(priceSpread / pip);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: risk-based lot calculation                              |
+//+------------------------------------------------------------------+
+double CalculateRiskBasedLots(const double stopDistancePips)
+  {
+   double distance = MathAbs(stopDistancePips);
+   if(distance <= 0.0)
+      return(0.0);
+
+   double riskAmount = AccountEquity() * (InpRiskPercent / 100.0);
+   if(riskAmount <= 0.0)
+      return(0.0);
+
+   double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+   double tickSize  = MarketInfo(Symbol(), MODE_TICKSIZE);
+   double pip       = PipSize();
+
+   if(tickSize <= 0.0 || pip <= 0.0 || tickValue <= 0.0)
+      return(0.0);
+
+   double pipValue = tickValue * (pip / tickSize);
+   if(pipValue <= 0.0)
+      return(0.0);
+
+   double lots = riskAmount / (distance * pipValue);
+   return(lots);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: minimum allowed distance for stops                      |
+//+------------------------------------------------------------------+
+double GetMinimumStopDistance()
+  {
+   double point       = MarketInfo(Symbol(), MODE_POINT);
+   double stopLevel   = MarketInfo(Symbol(), MODE_STOPLEVEL);
+   double freezeLevel = MarketInfo(Symbol(), MODE_FREEZELEVEL);
+
+   double minDistance = MathMax(stopLevel, freezeLevel) * point;
+   if(minDistance <= 0.0)
+      minDistance = point;
+
+   return(minDistance);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: check if proposed stop improves current stop            |
+//+------------------------------------------------------------------+
+bool IsBetterStopLoss(const int orderType,
+                      const double currentStop,
+                      const double newStop)
+  {
+   if(newStop <= 0.0)
+      return(false);
+
+   if(currentStop <= 0.0)
+      return(true);
+
+   if(orderType == OP_BUY)
+      return(newStop > currentStop + 1e-8);
+
+   if(orderType == OP_SELL)
+      return(newStop < currentStop - 1e-8);
+
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: trading session guard                                   |
+//+------------------------------------------------------------------+
+bool IsTradingSessionOpen()
+  {
+   if(!InpUseTradingSessions)
+      return(true);
+
+   datetime now = TimeCurrent();
+   int      hour = TimeHour(now);
+   if(hour < InpSessionStartHour || hour >= InpSessionEndHour)
+      return(false);
+
+   int dow = TimeDayOfWeek(now);
+   if(InpSessionSkipFriday && dow == 5)
+     {
+      if(hour >= InpFridayCutoffHour)
+         return(false);
+     }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: strategy cooldown check                                 |
+//+------------------------------------------------------------------+
+bool IsStrategyInCooldown(const StrategyState &state)
+  {
+   datetime now = TimeCurrent();
+
+   if(InpCooldownMinutes > 0 && state.lastTradeTime > 0)
+     {
+      datetime resumeTime = state.lastTradeTime + InpCooldownMinutes * 60;
+      if(now < resumeTime)
+         return(true);
+     }
+
+   if(InpLossStreakPause > 0 && state.lossStreak >= InpLossStreakPause)
+     {
+      if(InpLossPauseMinutes == 0)
+         return(true);
+
+      if(state.lossPauseUntil > 0 && now < state.lossPauseUntil)
+         return(true);
+
+      if(state.lossPauseUntil == 0 && InpLossPauseMinutes > 0)
+         return(true);
+     }
+
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: check for opposite open positions                       |
+//+------------------------------------------------------------------+
+bool HasOppositeStrategyPosition(StrategyIndex currentIndex,
+                                 const int direction)
+  {
+   if(InpAllowOppositePositions || direction == 0)
+      return(false);
+
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+
+      if(OrderSymbol() != Symbol())
+         continue;
+
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+         continue;
+
+      int magic = OrderMagicNumber();
+      int stratIndex = FindStrategyIndexByMagic(magic);
+      if(stratIndex < 0 || stratIndex == currentIndex)
+         continue;
+
+      if(direction > 0 && orderType == OP_SELL)
+         return(true);
+
+      if(direction < 0 && orderType == OP_BUY)
+         return(true);
+     }
+
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: reset loss pause after cooldown                         |
+//+------------------------------------------------------------------+
+void RefreshLossPause(StrategyState &state)
+  {
+   if(state.lossPauseUntil > 0 && TimeCurrent() >= state.lossPauseUntil)
+     {
+      state.lossPauseUntil = 0;
+      if(state.lossStreak >= InpLossStreakPause && InpLossPauseMinutes > 0)
+         state.lossStreak = 0;
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Utility: check if strategy already has an open trade             |
 //+------------------------------------------------------------------+
 bool HasOpenPosition(const StrategyState &state)
@@ -164,6 +446,27 @@ bool HasOpenPosition(const StrategyState &state)
 string TrimString(string value)
   {
    return(StringTrimLeft(StringTrimRight(value)));
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: uppercase helper                                        |
+//+------------------------------------------------------------------+
+string ToUpper(const string value)
+  {
+   string temp = value;
+   StringToUpper(temp);
+   return(temp);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: compare header token with expected key                  |
+//+------------------------------------------------------------------+
+bool HeaderKeyEquals(const string header,
+                     const string prefix,
+                     const string suffix)
+  {
+   string combined = prefix + "_" + suffix;
+   return(StringCompare(ToUpper(header), ToUpper(combined), false) == 0);
   }
 
 //+------------------------------------------------------------------+
@@ -459,7 +762,32 @@ void LogInputParameters(const string safeProfile)
    PrintFormat("Band config usage: enabled=%s inputFile='%s'",
                BoolToText(InpUseAtrBandConfig),
                InpAtrBandConfigFile);
-  }
+   PrintFormat("Risk settings: maxSpreadPips=%.2f useRiskLots=%s riskPercent=%.2f",
+               InpMaxSpreadPips,
+               BoolToText(InpUseRiskBasedLots),
+               InpRiskPercent);
+   PrintFormat("Cooldown settings: cooldownMins=%d lossPause=%d lossPauseMins=%d",
+               InpCooldownMinutes,
+               InpLossStreakPause,
+               InpLossPauseMinutes);
+   PrintFormat("Position control: allowOpposite=%s",
+               BoolToText(InpAllowOppositePositions));
+   PrintFormat("Break-even: enabled=%s atrTrigger=%.4f offsetPips=%d",
+               BoolToText(InpEnableBreakEven),
+               InpBreakEvenAtrTrigger,
+               InpBreakEvenOffsetPips);
+   PrintFormat("Trailing ATR: enabled=%s atrTrigger=%.4f atrStep=%.4f minStepPips=%d",
+               BoolToText(InpEnableAtrTrailing),
+               InpTrailingAtrTrigger,
+               InpTrailingAtrStep,
+               InpTrailingMinStepPips);
+   PrintFormat("Session filter: enabled=%s startHour=%d endHour=%d skipFriday=%s fridayCutoff=%d",
+               BoolToText(InpUseTradingSessions),
+               InpSessionStartHour,
+               InpSessionEndHour,
+               BoolToText(InpSessionSkipFriday),
+               InpFridayCutoffHour);
+ }
 
 //+------------------------------------------------------------------+
 //| Apply CSV-derived values to band setting                         |
@@ -553,6 +881,17 @@ bool LoadAtrBandConfig(const string safeProfile)
 
    bool headerConsumed = false;
    int  loadedRows     = 0;
+   const int columnsPerStrategy = 4;
+   int strategyColumnIndex[];
+   ArrayResize(strategyColumnIndex, STRAT_TOTAL * columnsPerStrategy);
+   for(int strat = 0; strat < STRAT_TOTAL; strat++)
+     {
+      for(int offset = 0; offset < columnsPerStrategy; offset++)
+        {
+         int idx = 2 + (strat * columnsPerStrategy) + offset;
+         strategyColumnIndex[(strat * columnsPerStrategy) + offset] = idx;
+        }
+     }
 
    while(!FileIsEnding(handle))
      {
@@ -579,40 +918,60 @@ bool LoadAtrBandConfig(const string safeProfile)
         {
          if(StringCompare(firstCell, "MINATR", false) == 0)
            {
+            for(int strat = 0; strat < STRAT_TOTAL; strat++)
+              {
+               for(int offset = 0; offset < columnsPerStrategy; offset++)
+                  strategyColumnIndex[(strat * columnsPerStrategy) + offset] = -1;
+              }
+
+            for(int col = 0; col < columnCount; col++)
+              {
+               string header = TrimString(columns[col]);
+               for(int strat = 0; strat < STRAT_TOTAL; strat++)
+                 {
+                  string prefix = g_strategyCsvPrefixes[strat];
+                  if(HeaderKeyEquals(header, prefix, "ENABLE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 0] = col;
+                  else if(HeaderKeyEquals(header, prefix, "MODE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 1] = col;
+                  else if(HeaderKeyEquals(header, prefix, "SL"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 2] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TP"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 3] = col;
+                 }
+              }
+
+            for(int strat = 0; strat < STRAT_TOTAL; strat++)
+              {
+               for(int offset = 0; offset < columnsPerStrategy; offset++)
+                 {
+                  int defaultIndex = 2 + (strat * columnsPerStrategy) + offset;
+                  int mappingIndex = strategyColumnIndex[(strat * columnsPerStrategy) + offset];
+                  if(mappingIndex < 0)
+                     strategyColumnIndex[(strat * columnsPerStrategy) + offset] = defaultIndex;
+                 }
+              }
+
             headerConsumed = true;
             continue;
            }
         }
       headerConsumed = true;
 
-      string values[];
-      const int columnsPerStrategy = 4;
-      int expected = 2 + (STRAT_TOTAL * columnsPerStrategy);
-      ArrayResize(values, expected);
-      for(int i = 0; i < expected; i++)
-        {
-         if(i < columnCount)
-            values[i] = TrimString(columns[i]);
-         else
-            values[i] = "";
-        }
-
       double minAtrValue = 0.0;
-      if(!ParseDoubleValue(values[0], minAtrValue))
+      if(!ParseDoubleValue(TrimString(columns[0]), minAtrValue))
          continue;
 
       double maxAtrValue = DBL_MAX;
-      bool hasMax = ParseDoubleValue(values[1], maxAtrValue);
+      bool hasMax = false;
+      if(columnCount > 1)
+         hasMax = ParseDoubleValue(TrimString(columns[1]), maxAtrValue);
       if(!hasMax || maxAtrValue <= minAtrValue)
          maxAtrValue = DBL_MAX;
 
-      PrintFormat("Band row parsed: rawMin='%s' rawMax='%s' MA_Enable='%s' MA_Mode='%s' RSI_Enable='%s' RSI_Mode='%s'",
-                  values[0],
-                  values[1],
-                  values[2],
-                  values[3],
-                  values[6],
-                  values[7]);
+      PrintFormat("Band row parsed: rawMin='%s' rawMax='%s'",
+                  columns[0],
+                  (columnCount > 1 ? columns[1] : ""));
 
       int index = ArraySize(g_bandConfigs);
       ArrayResize(g_bandConfigs, index + 1);
@@ -622,12 +981,31 @@ bool LoadAtrBandConfig(const string safeProfile)
 
       for(int strat = 0; strat < STRAT_TOTAL; strat++)
         {
-         int offset = 2 + (strat * columnsPerStrategy);
+         int baseOffset = strat * columnsPerStrategy;
+         string enableText = "";
+         string modeText   = "";
+         string slText     = "";
+         string tpText     = "";
+
+         int enableIndex = strategyColumnIndex[baseOffset];
+         int modeIndex   = strategyColumnIndex[baseOffset + 1];
+         int slIndex     = strategyColumnIndex[baseOffset + 2];
+         int tpIndex     = strategyColumnIndex[baseOffset + 3];
+
+         if(enableIndex >= 0 && enableIndex < columnCount)
+            enableText = TrimString(columns[enableIndex]);
+         if(modeIndex >= 0 && modeIndex < columnCount)
+            modeText = TrimString(columns[modeIndex]);
+         if(slIndex >= 0 && slIndex < columnCount)
+            slText = TrimString(columns[slIndex]);
+         if(tpIndex >= 0 && tpIndex < columnCount)
+            tpText = TrimString(columns[tpIndex]);
+
          ApplyBandSetting(g_bandConfigs[index].strategySettings[strat],
-                          values[offset],
-                          values[offset + 1],
-                          values[offset + 2],
-                          values[offset + 3]);
+                          enableText,
+                          modeText,
+                          slText,
+                          tpText);
         }
 
       loadedRows++;
@@ -678,15 +1056,14 @@ bool ResolveBandSetting(StrategyIndex index,
       double maxAtr = band.maxAtr;
       bool inRange = (atrValue >= band.minAtr &&
                       (maxAtr == DBL_MAX ? true : atrValue < maxAtr));
-      if(inRange)
+      if(!inRange)
+         continue;
+
+      StrategyBandSetting setting = band.strategySettings[index];
+      if(setting.configured)
         {
-         StrategyBandSetting setting = band.strategySettings[index];
-         if(setting.configured)
-           {
-            outSetting = setting;
-            return(true);
-           }
-         return(false);
+         outSetting = setting;
+         return(true);
         }
      }
 
@@ -950,27 +1327,44 @@ void LogTradeEvent(const StrategyState &state,
 //+------------------------------------------------------------------+
 //| Utility: place trade with SL/TP                                  |
 //+------------------------------------------------------------------+
-bool ExecuteEntry(const StrategyState &state,
-                  const int direction,
-                  const double atrValue,
-                  const double indicatorValue,
-                  const bool hasBandSetting,
-                  const StrategyBandSetting &bandSetting)
+TradeAttemptResult ExecuteEntry(const StrategyState &state,
+                                const int direction,
+                                const double atrValue,
+                                const double indicatorValue,
+                                const bool hasBandSetting,
+                                const StrategyBandSetting &bandSetting)
   {
    if(hasBandSetting && bandSetting.configured && !bandSetting.enabled)
      {
       PrintFormat("Band disabled: strategy=%s ATR=%.6f -> entry skipped", state.name, atrValue);
-      return(false);
+      return(TRADE_ATTEMPT_SKIPPED);
      }
 
    RefreshRates();
+
+   if(InpMaxSpreadPips > 0.0)
+     {
+      double spreadPips = CurrentSpreadPips();
+      if(spreadPips > InpMaxSpreadPips + 1e-6)
+        {
+         PrintFormat("Spread %.2f pips exceeds limit %.2f for %s. Entry skipped.",
+                     spreadPips,
+                     InpMaxSpreadPips,
+                     state.name);
+         return(TRADE_ATTEMPT_SKIPPED);
+        }
+     }
 
    int    cmd   = (direction > 0 ? OP_BUY : OP_SELL);
    double price = (cmd == OP_BUY ? Ask : Bid);
    double pip   = PipSize();
 
+   double requestedLots  = InpLots;
+   double normalizedLots = 0.0;
+
    double sl = 0.0;
    double tp = 0.0;
+   double stopDistancePips = 0.0;
 
    bool   useAtrStops              = InpUseATRStops;
    double atrStopMultiplier        = InpATRStopMultiplier;
@@ -998,19 +1392,23 @@ bool ExecuteEntry(const StrategyState &state,
         }
      }
 
+   if(useAtrStops && atrValue <= 0.0)
+     {
+      PrintFormat("ATR value unavailable for %s (ATR=%.6f). Falling back to pip-based stops.",
+                  state.name,
+                  atrValue);
+      useAtrStops = false;
+     }
+
    if(useAtrStops)
      {
-      if(atrValue <= 0.0)
-        {
-         Print("ATR value unavailable for ATR-based stops. Trade skipped for ", state.name);
-         return(false);
-        }
-
       if(atrStopMultiplier > 0.0)
         {
          double dist = atrValue * atrStopMultiplier;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
+         if(pip > 0.0)
+            stopDistancePips = dist / pip;
         }
 
       if(atrTakeProfitMultiplier > 0.0)
@@ -1027,6 +1425,7 @@ bool ExecuteEntry(const StrategyState &state,
          double dist = stopLossPips * pip;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
+         stopDistancePips = stopLossPips;
         }
 
       if(takeProfitPips > 0)
@@ -1037,11 +1436,52 @@ bool ExecuteEntry(const StrategyState &state,
         }
      }
 
+   if(InpUseRiskBasedLots)
+     {
+      double riskLots = CalculateRiskBasedLots(stopDistancePips);
+      if(riskLots > 0.0)
+        {
+         requestedLots = riskLots;
+        }
+      else
+        {
+         PrintFormat("Risk-based lot calculation unavailable for %s (stopPips=%.2f). Using fixed lots.",
+                     state.name,
+                     stopDistancePips);
+         requestedLots = InpLots;
+        }
+     }
+
+   normalizedLots = NormalizeLotSize(requestedLots);
+   if(normalizedLots <= 0.0)
+     {
+      PrintFormat("Normalized lot size is non-positive for strategy=%s (requested=%.4f)", state.name, requestedLots);
+      return(TRADE_ATTEMPT_CONSUMED);
+     }
+
+   if(MathAbs(normalizedLots - requestedLots) > 1e-8)
+     {
+      PrintFormat("Lot size adjusted for %s: requested=%.4f normalized=%.4f",
+                  state.name,
+                  requestedLots,
+                  normalizedLots);
+     }
+
+   double freeMarginAfter = AccountFreeMarginCheck(Symbol(), cmd, normalizedLots);
+   if(freeMarginAfter < 0.0)
+     {
+      PrintFormat("Insufficient margin for %s: requestedLots=%.4f normalizedLots=%.4f",
+                  state.name,
+                  requestedLots,
+                  normalizedLots);
+      return(TRADE_ATTEMPT_CONSUMED);
+     }
+
    string comment = state.comment;
    ResetLastError();
    int ticket = OrderSend(Symbol(),
                           cmd,
-                          InpLots,
+                          normalizedLots,
                           price,
                           InpSlippage,
                           sl,
@@ -1055,7 +1495,7 @@ bool ExecuteEntry(const StrategyState &state,
      {
       Print("OrderSend failed for ", state.name,
             ". Error: ", GetLastError());
-      return(false);
+      return(TRADE_ATTEMPT_CONSUMED);
      }
 
    if(OrderSelect(ticket, SELECT_BY_TICKET))
@@ -1082,7 +1522,7 @@ bool ExecuteEntry(const StrategyState &state,
             ". Error: ", GetLastError());
      }
 
-   return(true);
+   return(TRADE_ATTEMPT_PLACED);
   }
 
 //+------------------------------------------------------------------+
@@ -1201,6 +1641,8 @@ int EvaluateStochastic(double &indicatorValue)
 void ProcessStrategy(StrategyIndex index, const double atrValue)
   {
    StrategyState state = g_strategies[index];
+   RefreshLossPause(state);
+   g_strategies[index] = state;
    if(!state.enabled)
       return;
 
@@ -1230,12 +1672,21 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
       case STRAT_MACD:
          direction = EvaluateMACD(indicatorValue);
          break;
-      case STRAT_STOCH:
-         direction = EvaluateStochastic(indicatorValue);
-         break;
+     case STRAT_STOCH:
+        direction = EvaluateStochastic(indicatorValue);
+        break;
      }
 
-   if(direction == 0)
+  if(direction == 0)
+     return;
+
+   if(!IsTradingSessionOpen())
+      return;
+
+   if(IsStrategyInCooldown(state))
+      return;
+
+   if(HasOppositeStrategyPosition(index, direction))
       return;
 
    datetime signalBarTime = Time[1];
@@ -1252,15 +1703,18 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
    if(!IsTradeAllowed(Symbol(), TimeCurrent()))
       return;
 
-   if(ExecuteEntry(state,
-                   direction,
-                   atrValue,
-                   indicatorValue,
-                   hasBandSetting,
-                   bandSetting))
+   TradeAttemptResult attempt = ExecuteEntry(state,
+                                             direction,
+                                             atrValue,
+                                             indicatorValue,
+                                             hasBandSetting,
+                                             bandSetting);
+   if(attempt == TRADE_ATTEMPT_PLACED ||
+      attempt == TRADE_ATTEMPT_CONSUMED)
      {
       state.lastBarTime  = signalBarTime;
       state.lastDirection = direction;
+      state.lastTradeTime = TimeCurrent();
       g_strategies[index] = state;
      }
   }
@@ -1337,8 +1791,222 @@ void CheckClosedOrders()
                     pipValue,
                     closeTime);
 
+      StrategyState state = g_strategies[stratIndex];
+      if(netProfit < 0.0)
+        {
+         state.lossStreak++;
+         if(InpLossStreakPause > 0 && state.lossStreak >= InpLossStreakPause)
+           {
+            if(InpLossPauseMinutes > 0)
+               state.lossPauseUntil = closeTime + InpLossPauseMinutes * 60;
+            else
+               state.lossPauseUntil = closeTime;
+           }
+        }
+      else
+        {
+         state.lossStreak = 0;
+         state.lossPauseUntil = 0;
+        }
+      g_strategies[stratIndex] = state;
+
       MarkExitLogged(ticket);
       processedNew = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Manage break-even and ATR trailing stops for open orders         |
+//+------------------------------------------------------------------+
+void ManageOpenPositions(const double atrValue)
+  {
+   if(atrValue <= 0.0)
+      return;
+
+   if(!InpEnableBreakEven && !InpEnableAtrTrailing)
+      return;
+
+   double pip = PipSize();
+   if(pip <= 0.0)
+      return;
+
+   double minStopDistance = GetMinimumStopDistance();
+   if(minStopDistance <= 0.0)
+      minStopDistance = pip;
+
+   double breakEvenTriggerDistance = atrValue * InpBreakEvenAtrTrigger;
+   double trailingTriggerDistance  = atrValue * InpTrailingAtrTrigger;
+   double trailingStepDistance     = atrValue * InpTrailingAtrStep;
+   double trailingMinStepDistance  = InpTrailingMinStepPips * pip;
+
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+
+      if(OrderSymbol() != Symbol())
+         continue;
+
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+         continue;
+
+      int magic = OrderMagicNumber();
+      if(FindStrategyIndexByMagic(magic) < 0)
+         continue;
+
+      RefreshRates();
+      double currentPrice = (orderType == OP_BUY ? Bid : Ask);
+      double openPrice    = OrderOpenPrice();
+      double profitDistance = (orderType == OP_BUY
+                               ? currentPrice - openPrice
+                               : openPrice - currentPrice);
+      if(profitDistance <= 0.0)
+         continue;
+
+      double currentStop = OrderStopLoss();
+      double targetStop  = currentStop;
+      bool   pendingUpdate = false;
+
+      double breakEvenStop = (orderType == OP_BUY
+                              ? openPrice + InpBreakEvenOffsetPips * pip
+                              : openPrice - InpBreakEvenOffsetPips * pip);
+      bool breakEvenAvailable = false;
+
+      if(InpEnableBreakEven &&
+         InpBreakEvenAtrTrigger > 0.0 &&
+         breakEvenTriggerDistance > 0.0 &&
+         profitDistance >= breakEvenTriggerDistance - 1e-8)
+        {
+         if(orderType == OP_BUY)
+           {
+            double maxStop = currentPrice - minStopDistance;
+            if(maxStop >= breakEvenStop - 1e-8)
+              {
+               breakEvenAvailable = true;
+               if(IsBetterStopLoss(orderType, currentStop, breakEvenStop))
+                 {
+                  targetStop = breakEvenStop;
+                  pendingUpdate = true;
+                 }
+              }
+           }
+         else
+           {
+            double minStop = currentPrice + minStopDistance;
+            if(breakEvenStop >= minStop - 1e-8)
+              {
+               breakEvenAvailable = true;
+               if(IsBetterStopLoss(orderType, currentStop, breakEvenStop))
+                 {
+                  targetStop = breakEvenStop;
+                  pendingUpdate = true;
+                 }
+              }
+           }
+        }
+
+      if(InpEnableBreakEven && currentStop > 0.0)
+        {
+         if(orderType == OP_BUY && currentStop >= breakEvenStop - 1e-8)
+            breakEvenAvailable = true;
+         if(orderType == OP_SELL && currentStop <= breakEvenStop + 1e-8)
+            breakEvenAvailable = true;
+        }
+
+      if(InpEnableAtrTrailing &&
+         trailingTriggerDistance > 0.0 &&
+         trailingStepDistance > 0.0 &&
+         profitDistance >= trailingTriggerDistance - 1e-8)
+        {
+         double compareStop = (pendingUpdate ? targetStop : currentStop);
+
+         if(orderType == OP_BUY)
+           {
+            double maxStop = currentPrice - minStopDistance;
+            if(maxStop <= 0.0)
+               continue;
+
+            double trailingFloor = openPrice;
+            if(breakEvenAvailable)
+               trailingFloor = MathMax(trailingFloor, breakEvenStop);
+
+            if(trailingFloor > maxStop + 1e-8)
+               continue;
+
+            double candidate = currentPrice - trailingStepDistance;
+            if(candidate > maxStop)
+               candidate = maxStop;
+            if(candidate < trailingFloor)
+               candidate = trailingFloor;
+
+            if(candidate < trailingFloor - 1e-8 || candidate > maxStop + 1e-8)
+               continue;
+
+            double diff = candidate - compareStop;
+            if(compareStop <= 0.0)
+               diff = candidate;
+
+            if(trailingMinStepDistance > 0.0 &&
+               diff < trailingMinStepDistance - 1e-8)
+               continue;
+
+            if(IsBetterStopLoss(orderType, compareStop, candidate))
+              {
+               targetStop = candidate;
+               pendingUpdate = true;
+              }
+           }
+         else
+           {
+            double minStop = currentPrice + minStopDistance;
+            double trailingCeiling = openPrice;
+            if(breakEvenAvailable)
+               trailingCeiling = MathMin(trailingCeiling, breakEvenStop);
+
+            if(trailingCeiling < minStop - 1e-8)
+               continue;
+
+            double candidate = currentPrice + trailingStepDistance;
+            if(candidate < minStop)
+               candidate = minStop;
+            if(candidate > trailingCeiling)
+               candidate = trailingCeiling;
+
+            if(candidate < minStop - 1e-8 || candidate > trailingCeiling + 1e-8)
+               continue;
+
+            double diff = (compareStop > 0.0 ? compareStop - candidate : candidate);
+            if(trailingMinStepDistance > 0.0 &&
+               diff < trailingMinStepDistance - 1e-8)
+               continue;
+
+            if(IsBetterStopLoss(orderType, compareStop, candidate))
+              {
+               targetStop = candidate;
+               pendingUpdate = true;
+              }
+           }
+        }
+
+      if(pendingUpdate)
+        {
+         double normalizedStop = NormalizeDouble(targetStop, Digits);
+         if(IsTradeContextBusy())
+            return;
+
+         if(!OrderModify(OrderTicket(),
+                         OrderOpenPrice(),
+                         normalizedStop,
+                         OrderTakeProfit(),
+                         OrderExpiration()))
+           {
+            Print("OrderModify failed for ticket ",
+                  OrderTicket(),
+                  ". Error: ",
+                  GetLastError());
+           }
+        }
      }
   }
 
@@ -1395,16 +2063,51 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
      }
 
-   if(InpStochBuyLevel < 0.0 || InpStochSellLevel > 100.0 || InpStochBuyLevel >= InpStochSellLevel)
-     {
-      Print("Stochastic levels must satisfy 0 <= BuyLevel < SellLevel <= 100.");
-      return(INIT_PARAMETERS_INCORRECT);
-     }
+  if(InpStochBuyLevel < 0.0 || InpStochSellLevel > 100.0 || InpStochBuyLevel >= InpStochSellLevel)
+    {
+     Print("Stochastic levels must satisfy 0 <= BuyLevel < SellLevel <= 100.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
 
-   if(InpUseATRStops)
-     {
-      if(InpATRStopMultiplier < 0.0 || InpATRTakeProfitMultiplier < 0.0)
-        {
+  if(InpMaxSpreadPips < 0.0)
+    {
+     Print("Max spread pips must be zero or positive.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
+  if(InpUseRiskBasedLots && InpRiskPercent <= 0.0)
+    {
+     Print("Risk percent must be greater than zero when risk-based lots are enabled.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
+  if(InpCooldownMinutes < 0 || InpLossStreakPause < 0 || InpLossPauseMinutes < 0)
+    {
+     Print("Cooldown and loss streak parameters must be zero or positive.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
+  if(InpUseTradingSessions)
+    {
+     if(InpSessionStartHour < 0 || InpSessionStartHour > 23 ||
+        InpSessionEndHour <= 0 || InpSessionEndHour > 24 ||
+        InpSessionStartHour >= InpSessionEndHour)
+       {
+        Print("Trading session hours must satisfy 0 <= start < end <= 24.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+
+     if(InpSessionSkipFriday && (InpFridayCutoffHour < 0 || InpFridayCutoffHour > 24))
+       {
+        Print("Friday cutoff hour must be between 0 and 24.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+    }
+
+  if(InpUseATRStops)
+    {
+     if(InpATRStopMultiplier < 0.0 || InpATRTakeProfitMultiplier < 0.0)
+       {
          Print("ATR multipliers must be zero or positive when ATR stops are enabled.");
          return(INIT_PARAMETERS_INCORRECT);
         }
@@ -1416,12 +2119,45 @@ int OnInit()
         }
      }
 
-   g_strategies[STRAT_MA].name  = "MA_CROSS";
+  if(InpEnableBreakEven)
+    {
+     if(InpBreakEvenAtrTrigger <= 0.0)
+       {
+        Print("Break-even ATR trigger must be greater than zero when break-even is enabled.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+
+     if(InpBreakEvenOffsetPips < 0)
+       {
+        Print("Break-even offset pips must be zero or positive.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+    }
+
+  if(InpEnableAtrTrailing)
+    {
+     if(InpTrailingAtrTrigger <= 0.0 || InpTrailingAtrStep <= 0.0)
+       {
+        Print("Trailing ATR trigger and step must be greater than zero when ATR trailing is enabled.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+
+     if(InpTrailingMinStepPips < 0)
+       {
+        Print("Trailing minimum step pips must be zero or positive.");
+        return(INIT_PARAMETERS_INCORRECT);
+       }
+    }
+
+  g_strategies[STRAT_MA].name  = "MA_CROSS";
    g_strategies[STRAT_MA].comment = "MA";
    g_strategies[STRAT_MA].magic = 10101;
    g_strategies[STRAT_MA].enabled = InpEnableMA;
    g_strategies[STRAT_MA].lastBarTime = 0;
    g_strategies[STRAT_MA].lastDirection = 0;
+   g_strategies[STRAT_MA].lastTradeTime = 0;
+   g_strategies[STRAT_MA].lossStreak = 0;
+   g_strategies[STRAT_MA].lossPauseUntil = 0;
 
    g_strategies[STRAT_RSI].name  = "RSI";
    g_strategies[STRAT_RSI].comment = "RSI";
@@ -1429,6 +2165,9 @@ int OnInit()
    g_strategies[STRAT_RSI].enabled = InpEnableRSI;
    g_strategies[STRAT_RSI].lastBarTime = 0;
    g_strategies[STRAT_RSI].lastDirection = 0;
+   g_strategies[STRAT_RSI].lastTradeTime = 0;
+   g_strategies[STRAT_RSI].lossStreak = 0;
+   g_strategies[STRAT_RSI].lossPauseUntil = 0;
 
    g_strategies[STRAT_CCI].name  = "CCI";
    g_strategies[STRAT_CCI].comment = "CCI";
@@ -1436,6 +2175,9 @@ int OnInit()
    g_strategies[STRAT_CCI].enabled = InpEnableCCI;
    g_strategies[STRAT_CCI].lastBarTime = 0;
    g_strategies[STRAT_CCI].lastDirection = 0;
+   g_strategies[STRAT_CCI].lastTradeTime = 0;
+   g_strategies[STRAT_CCI].lossStreak = 0;
+   g_strategies[STRAT_CCI].lossPauseUntil = 0;
 
    g_strategies[STRAT_MACD].name  = "MACD";
    g_strategies[STRAT_MACD].comment = "MACD";
@@ -1443,6 +2185,9 @@ int OnInit()
    g_strategies[STRAT_MACD].enabled = InpEnableMACD;
    g_strategies[STRAT_MACD].lastBarTime = 0;
    g_strategies[STRAT_MACD].lastDirection = 0;
+   g_strategies[STRAT_MACD].lastTradeTime = 0;
+   g_strategies[STRAT_MACD].lossStreak = 0;
+   g_strategies[STRAT_MACD].lossPauseUntil = 0;
 
    g_strategies[STRAT_STOCH].name  = "STOCH";
    g_strategies[STRAT_STOCH].comment = "STOCH";
@@ -1450,6 +2195,9 @@ int OnInit()
    g_strategies[STRAT_STOCH].enabled = InpEnableStoch;
    g_strategies[STRAT_STOCH].lastBarTime = 0;
    g_strategies[STRAT_STOCH].lastDirection = 0;
+   g_strategies[STRAT_STOCH].lastTradeTime = 0;
+   g_strategies[STRAT_STOCH].lossStreak = 0;
+   g_strategies[STRAT_STOCH].lossPauseUntil = 0;
 
    g_profileLabel = StringTrimLeft(StringTrimRight(InpProfileName));
    if(StringLen(g_profileLabel) == 0)
@@ -1517,6 +2265,8 @@ void OnTick()
    ProcessStrategy(STRAT_CCI, atrValue);
    ProcessStrategy(STRAT_MACD, atrValue);
    ProcessStrategy(STRAT_STOCH, atrValue);
+
+   ManageOpenPositions(atrValue);
 
    CheckClosedOrders();
   }
