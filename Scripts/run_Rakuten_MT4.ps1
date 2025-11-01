@@ -1,0 +1,1 @@
+D:\Rakuten_MT4\terminal.exe /portable

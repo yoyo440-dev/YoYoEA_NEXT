@@ -15,6 +15,8 @@ input bool   InpEnableCCI       = true;
 input bool   InpEnableMACD      = true;
 input bool   InpEnableStoch     = true;
 input bool   InpUseATRStops     = false;
+input bool   InpUseAtrBandConfig = false;
+input string InpAtrBandConfigFile = "";
 
 input int    InpATRPeriod       = 14;
 
@@ -72,6 +74,35 @@ int           g_exitLoggedTickets[];
 
 #define RESULT_LOG_COLUMNS 16
 
+enum StopMode
+  {
+   STOP_MODE_GLOBAL = 0,
+   STOP_MODE_ATR,
+   STOP_MODE_PIPS
+  };
+
+struct StrategyBandSetting
+  {
+   bool     configured;
+   bool     enabled;
+   StopMode mode;
+   double   atrStopMultiplier;
+   double   atrTakeProfitMultiplier;
+   int      stopLossPips;
+   int      takeProfitPips;
+  };
+
+struct BandConfig
+  {
+   double minAtr;
+   double maxAtr;
+   StrategyBandSetting strategySettings[STRAT_TOTAL];
+  };
+
+BandConfig g_bandConfigs[];
+bool       g_bandConfigLoaded = false;
+string     g_bandConfigPath   = "";
+
 //+------------------------------------------------------------------+
 //| Utility: sanitise profile name for file usage                    |
 //+------------------------------------------------------------------+
@@ -125,7 +156,340 @@ bool HasOpenPosition(const StrategyState &state)
          return(true);
      }
    return(false);
-}
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: trim whitespace                                         |
+//+------------------------------------------------------------------+
+string TrimString(string value)
+  {
+   return(StringTrimLeft(StringTrimRight(value)));
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: initialise band setting defaults                        |
+//+------------------------------------------------------------------+
+void InitStrategyBandSetting(StrategyBandSetting &setting)
+  {
+   setting.configured               = false;
+   setting.enabled                  = true;
+   setting.mode                     = STOP_MODE_GLOBAL;
+   setting.atrStopMultiplier        = -1.0;
+   setting.atrTakeProfitMultiplier  = -1.0;
+   setting.stopLossPips             = -1;
+   setting.takeProfitPips           = -1;
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: initialise band config                                  |
+//+------------------------------------------------------------------+
+void InitBandConfig(BandConfig &config)
+  {
+   config.minAtr = 0.0;
+   config.maxAtr = DBL_MAX;
+   for(int i = 0; i < STRAT_TOTAL; i++)
+      InitStrategyBandSetting(config.strategySettings[i]);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: parse boolean text                                      |
+//+------------------------------------------------------------------+
+bool ParseBoolValue(const string text, const bool defaultValue)
+  {
+   string trimmed = TrimString(text);
+   if(StringLen(trimmed) == 0)
+      return(defaultValue);
+
+   string upper = StringToUpper(trimmed);
+   if(upper == "1" || upper == "TRUE" || upper == "ON" || upper == "YES")
+      return(true);
+   if(upper == "0" || upper == "FALSE" || upper == "OFF" || upper == "NO")
+      return(false);
+   return(defaultValue);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: parse double text                                       |
+//+------------------------------------------------------------------+
+bool ParseDoubleValue(const string text, double &value)
+  {
+   string trimmed = TrimString(text);
+   if(StringLen(trimmed) == 0)
+      return(false);
+
+   value = StrToDouble(trimmed);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: parse integer text                                      |
+//+------------------------------------------------------------------+
+bool ParseIntValue(const string text, int &value)
+  {
+   string trimmed = TrimString(text);
+   if(StringLen(trimmed) == 0)
+      return(false);
+
+   value = (int)StrToInteger(trimmed);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: check if string is numeric                              |
+//+------------------------------------------------------------------+
+bool IsNumericString(const string text)
+  {
+   int len = StringLen(text);
+   if(len == 0)
+      return(false);
+
+   for(int i = 0; i < len; i++)
+     {
+      int ch = StringGetChar(text, i);
+      if((ch >= '0' && ch <= '9') || ch == '.' || ch == '+' || ch == '-')
+         continue;
+      return(false);
+     }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: strip enclosing quotes                                  |
+//+------------------------------------------------------------------+
+string StripEnclosingQuotes(string value)
+  {
+   int len = StringLen(value);
+   if(len >= 2)
+     {
+      int first = StringGetChar(value, 0);
+      int last  = StringGetChar(value, len - 1);
+      if((first == '"' && last == '"') || (first == '\'' && last == '\''))
+         return(StringSubstr(value, 1, len - 2));
+     }
+   return(value);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: parse stop mode text                                    |
+//+------------------------------------------------------------------+
+StopMode ParseStopModeValue(const string text)
+  {
+   string trimmed = TrimString(text);
+   if(StringLen(trimmed) == 0)
+      return(STOP_MODE_GLOBAL);
+
+   string upper = StringToUpper(trimmed);
+   if(upper == "ATR")
+      return(STOP_MODE_ATR);
+   if(upper == "PIPS" || upper == "PIP")
+      return(STOP_MODE_PIPS);
+   if(upper == "GLOBAL" || upper == "DEFAULT")
+      return(STOP_MODE_GLOBAL);
+
+   return(STOP_MODE_GLOBAL);
+  }
+
+//+------------------------------------------------------------------+
+//| Apply CSV-derived values to band setting                         |
+//+------------------------------------------------------------------+
+void ApplyBandSetting(StrategyBandSetting &setting,
+                      const string enableText,
+                      const string modeText,
+                      const string slText,
+                      const string tpText)
+  {
+   string trimmedEnable = TrimString(enableText);
+   if(StringLen(trimmedEnable) == 0)
+     {
+      setting.configured = false;
+      return;
+     }
+
+   setting.configured              = true;
+   setting.enabled                 = ParseBoolValue(trimmedEnable, true);
+   setting.mode                    = ParseStopModeValue(modeText);
+   setting.atrStopMultiplier       = -1.0;
+   setting.atrTakeProfitMultiplier = -1.0;
+   setting.stopLossPips            = -1;
+   setting.takeProfitPips          = -1;
+
+   if(setting.mode == STOP_MODE_ATR)
+     {
+      double value = 0.0;
+      if(ParseDoubleValue(slText, value))
+         setting.atrStopMultiplier = value;
+      if(ParseDoubleValue(tpText, value))
+         setting.atrTakeProfitMultiplier = value;
+     }
+   else if(setting.mode == STOP_MODE_PIPS)
+     {
+      int ivalue = 0;
+      if(ParseIntValue(slText, ivalue))
+         setting.stopLossPips = ivalue;
+      if(ParseIntValue(tpText, ivalue))
+         setting.takeProfitPips = ivalue;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Load ATR band configuration from file                            |
+//+------------------------------------------------------------------+
+bool LoadAtrBandConfig(const string safeProfile)
+  {
+   ArrayResize(g_bandConfigs, 0);
+   g_bandConfigLoaded = false;
+   g_bandConfigPath   = "";
+
+   if(!InpUseAtrBandConfig)
+      return(false);
+
+   string fileName = TrimString(InpAtrBandConfigFile);
+   fileName = StripEnclosingQuotes(fileName);
+   if(StringLen(fileName) == 0 ||
+      (IsNumericString(fileName) && MathAbs(StrToDouble(fileName)) < 0.0000001))
+      fileName = "AtrBandConfig_" + safeProfile + ".csv";
+
+   StringReplace(fileName, "{PROFILE}", safeProfile);
+   StringReplace(fileName, "{profile}", safeProfile);
+   g_bandConfigPath = fileName;
+
+   int handle = FileOpen(fileName, FILE_READ | FILE_SHARE_READ | FILE_TXT);
+   if(handle == INVALID_HANDLE)
+     {
+      int err = GetLastError();
+      PrintFormat("ATR band config file '%s' could not be opened (error %d).", fileName, err);
+      return(false);
+     }
+
+   bool headerConsumed = false;
+   int  loadedRows     = 0;
+
+   while(!FileIsEnding(handle))
+     {
+      ResetLastError();
+      string rawLine = FileReadString(handle);
+      int lastError = GetLastError();
+      if(lastError == ERR_END_OF_FILE && StringLen(rawLine) == 0)
+         break;
+
+      rawLine = StringReplace(rawLine, "\r", "");
+      rawLine = TrimString(rawLine);
+      if(StringLen(rawLine) == 0)
+         continue;
+      if(StringGetChar(rawLine, 0) == '#')
+         continue;
+
+      string columns[];
+      int columnCount = StringSplit(rawLine, ',', columns);
+      if(columnCount <= 0)
+         continue;
+
+      string firstCell = TrimString(columns[0]);
+      if(!headerConsumed)
+        {
+         string header = StringToUpper(firstCell);
+         if(header == "MINATR")
+           {
+            headerConsumed = true;
+            continue;
+           }
+        }
+      headerConsumed = true;
+
+      string values[];
+      int expected = 10;
+      ArrayResize(values, expected);
+      for(int i = 0; i < expected; i++)
+        {
+         if(i < columnCount)
+            values[i] = TrimString(columns[i]);
+         else
+            values[i] = "";
+        }
+
+      double minAtrValue = 0.0;
+      if(!ParseDoubleValue(values[0], minAtrValue))
+         continue;
+
+      double maxAtrValue = DBL_MAX;
+      bool hasMax = ParseDoubleValue(values[1], maxAtrValue);
+      if(!hasMax || maxAtrValue <= minAtrValue)
+         maxAtrValue = DBL_MAX;
+
+      int index = ArraySize(g_bandConfigs);
+      ArrayResize(g_bandConfigs, index + 1);
+      InitBandConfig(g_bandConfigs[index]);
+      g_bandConfigs[index].minAtr = minAtrValue;
+      g_bandConfigs[index].maxAtr = maxAtrValue;
+
+      ApplyBandSetting(g_bandConfigs[index].strategySettings[STRAT_MA],
+                       values[2], values[3], values[4], values[5]);
+      ApplyBandSetting(g_bandConfigs[index].strategySettings[STRAT_RSI],
+                       values[6], values[7], values[8], values[9]);
+
+      loadedRows++;
+     }
+
+   FileClose(handle);
+
+   if(loadedRows <= 0)
+     {
+      ArrayResize(g_bandConfigs, 0);
+      PrintFormat("ATR band config file '%s' did not contain any usable rows.", fileName);
+      return(false);
+     }
+
+   int total = ArraySize(g_bandConfigs);
+   for(int i = 0; i < total - 1; i++)
+     {
+      for(int j = i + 1; j < total; j++)
+        {
+         if(g_bandConfigs[i].minAtr > g_bandConfigs[j].minAtr)
+           {
+            BandConfig temp    = g_bandConfigs[i];
+            g_bandConfigs[i] = g_bandConfigs[j];
+            g_bandConfigs[j] = temp;
+           }
+        }
+     }
+
+   g_bandConfigLoaded = true;
+   PrintFormat("Loaded %d ATR band configuration rows from '%s'.", loadedRows, fileName);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Resolve band setting for current ATR                             |
+//+------------------------------------------------------------------+
+bool ResolveBandSetting(StrategyIndex index,
+                        const double atrValue,
+                        StrategyBandSetting &outSetting)
+  {
+   if(!g_bandConfigLoaded || atrValue <= 0.0)
+      return(false);
+
+   int total = ArraySize(g_bandConfigs);
+   for(int i = 0; i < total; i++)
+     {
+      BandConfig band = g_bandConfigs[i];
+      double maxAtr = band.maxAtr;
+      bool inRange = (atrValue >= band.minAtr &&
+                      (maxAtr == DBL_MAX ? true : atrValue < maxAtr));
+      if(inRange)
+        {
+         StrategyBandSetting setting = band.strategySettings[index];
+         if(setting.configured)
+           {
+            outSetting = setting;
+            return(true);
+           }
+         return(false);
+        }
+     }
+
+   return(false);
+  }
 
 //+------------------------------------------------------------------+
 //| Utility: write entry info to CSV log                             |
@@ -387,8 +751,16 @@ void LogTradeEvent(const StrategyState &state,
 bool ExecuteEntry(const StrategyState &state,
                   const int direction,
                   const double atrValue,
-                  const double indicatorValue)
+                  const double indicatorValue,
+                  const bool hasBandSetting,
+                  const StrategyBandSetting &bandSetting)
   {
+   if(hasBandSetting && bandSetting.configured && !bandSetting.enabled)
+     {
+      PrintFormat("Band disabled: strategy=%s ATR=%.6f -> entry skipped", state.name, atrValue);
+      return(false);
+     }
+
    RefreshRates();
 
    int    cmd   = (direction > 0 ? OP_BUY : OP_SELL);
@@ -398,7 +770,33 @@ bool ExecuteEntry(const StrategyState &state,
    double sl = 0.0;
    double tp = 0.0;
 
-   if(InpUseATRStops)
+   bool   useAtrStops              = InpUseATRStops;
+   double atrStopMultiplier        = InpATRStopMultiplier;
+   double atrTakeProfitMultiplier  = InpATRTakeProfitMultiplier;
+   int    stopLossPips             = InpStopLossPips;
+   int    takeProfitPips           = InpTakeProfitPips;
+
+   if(hasBandSetting && bandSetting.configured)
+     {
+      if(bandSetting.mode == STOP_MODE_ATR)
+        {
+         useAtrStops = true;
+         if(bandSetting.atrStopMultiplier >= 0.0)
+            atrStopMultiplier = bandSetting.atrStopMultiplier;
+         if(bandSetting.atrTakeProfitMultiplier >= 0.0)
+            atrTakeProfitMultiplier = bandSetting.atrTakeProfitMultiplier;
+        }
+      else if(bandSetting.mode == STOP_MODE_PIPS)
+        {
+         useAtrStops = false;
+         if(bandSetting.stopLossPips >= 0)
+            stopLossPips = bandSetting.stopLossPips;
+         if(bandSetting.takeProfitPips >= 0)
+            takeProfitPips = bandSetting.takeProfitPips;
+        }
+     }
+
+   if(useAtrStops)
      {
       if(atrValue <= 0.0)
         {
@@ -406,32 +804,32 @@ bool ExecuteEntry(const StrategyState &state,
          return(false);
         }
 
-      if(InpATRStopMultiplier > 0.0)
+      if(atrStopMultiplier > 0.0)
         {
-         double dist = atrValue * InpATRStopMultiplier;
+         double dist = atrValue * atrStopMultiplier;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
         }
 
-      if(InpATRTakeProfitMultiplier > 0.0)
+      if(atrTakeProfitMultiplier > 0.0)
         {
-         double dist = atrValue * InpATRTakeProfitMultiplier;
+         double dist = atrValue * atrTakeProfitMultiplier;
          tp = (cmd == OP_BUY ? price + dist : price - dist);
          tp = NormalizeDouble(tp, Digits);
         }
      }
    else
      {
-      if(InpStopLossPips > 0)
+      if(stopLossPips > 0)
         {
-         double dist = InpStopLossPips * pip;
+         double dist = stopLossPips * pip;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
         }
 
-      if(InpTakeProfitPips > 0)
+      if(takeProfitPips > 0)
         {
-         double dist = InpTakeProfitPips * pip;
+         double dist = takeProfitPips * pip;
          tp = (cmd == OP_BUY ? price + dist : price - dist);
          tp = NormalizeDouble(tp, Digits);
         }
@@ -604,6 +1002,15 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
    if(!state.enabled)
       return;
 
+   StrategyBandSetting bandSetting;
+   InitStrategyBandSetting(bandSetting);
+   bool hasBandSetting = ResolveBandSetting(index, atrValue, bandSetting);
+   if(hasBandSetting && !bandSetting.enabled)
+     {
+      PrintFormat("Band disabled: strategy=%s ATR=%.6f -> signal ignored", state.name, atrValue);
+      return;
+     }
+
    double indicatorValue = 0.0;
    int    direction      = 0;
 
@@ -643,7 +1050,12 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
    if(!IsTradeAllowed(Symbol(), TimeCurrent()))
       return;
 
-   if(ExecuteEntry(state, direction, atrValue, indicatorValue))
+   if(ExecuteEntry(state,
+                   direction,
+                   atrValue,
+                   indicatorValue,
+                   hasBandSetting,
+                   bandSetting))
      {
       state.lastBarTime  = signalBarTime;
       state.lastDirection = direction;
@@ -844,6 +1256,8 @@ int OnInit()
    string safeProfile = SanitiseProfileName(InpProfileName);
    g_logFileName      = "EntryLog_" + safeProfile + ".csv";
    g_resultLogFileName = "TradeLog_" + safeProfile + ".csv";
+
+   LoadAtrBandConfig(safeProfile);
 
    int handle = FileOpen(g_logFileName,
                          FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
