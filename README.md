@@ -22,7 +22,7 @@ YoYoEA_NEXT は複数ストラテジー（MA、RSI、CCI、MACD、Stochastic）�
 
 ## ログファイル
 - エントリーログ：`EntryLog_<Profile>.csv` – 発注時の価格、ATR、指標値などを追跡
-- トレードログ：`TradeLog_<Profile>.csv` – 決済時の損益、スワップ、コミッション、獲得 pips を記録。クールダウンや連敗情報の更新にも利用
+- トレードログ：`TradeLog_<Profile>.csv` – 決済時の損益、スワップ、コミッション、獲得 pips、`exit_reason`（`TAKE_PROFIT` / `STOP_BREAKEVEN` / `STOP_TRAILING` / `STOP_LOSS` / `MANUAL_*`）を記録。クールダウンや連敗情報の更新にも利用
 
 ## ビルドと配置
 1. PowerShell で `Scripts/build_experts.ps1` を実行すると、MQL4/Experts 配下の EA をまとめてコンパイルできます。

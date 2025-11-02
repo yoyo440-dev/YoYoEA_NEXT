@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.20"
+#property version   "1.21"
 #property description "Entry evaluation EA for MA, RSI, CCI, and MACD strategies."
 
 //--- input parameters
@@ -94,7 +94,27 @@ string        g_profileLabel;
 string        g_resultLogFileName;
 int           g_exitLoggedTickets[];
 
-#define RESULT_LOG_COLUMNS 16
+#define RESULT_LOG_COLUMNS 17
+
+enum StopUpdateReason
+  {
+   STOP_UPDATE_NONE = 0,
+   STOP_UPDATE_INITIAL,
+   STOP_UPDATE_BREAK_EVEN,
+   STOP_UPDATE_TRAILING
+  };
+
+struct TradeMetadata
+  {
+   int    ticket;
+   double entryPrice;
+   double stopLoss;
+   double takeProfit;
+   int    direction;
+   StopUpdateReason lastStopReason;
+  };
+
+TradeMetadata g_tradeMetadata[];
 
 enum StopMode
   {
@@ -1117,6 +1137,116 @@ int FindStrategyIndexByMagic(const int magic)
    return(-1);
   }
 
+int FindTradeMetadataIndex(const int ticket)
+  {
+   for(int i = ArraySize(g_tradeMetadata) - 1; i >= 0; i--)
+     {
+      if(g_tradeMetadata[i].ticket == ticket)
+         return(i);
+     }
+   return(-1);
+  }
+
+void RegisterTradeMetadata(const int ticket,
+                           const int direction)
+  {
+   if(!OrderSelect(ticket, SELECT_BY_TICKET))
+      return;
+
+   TradeMetadata meta;
+   meta.ticket        = ticket;
+   meta.entryPrice    = OrderOpenPrice();
+   meta.stopLoss      = OrderStopLoss();
+   meta.takeProfit    = OrderTakeProfit();
+   meta.direction     = direction;
+   meta.lastStopReason = STOP_UPDATE_INITIAL;
+
+   double pip = PipSize();
+   double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
+   double breakEvenStop = (direction > 0
+                           ? meta.entryPrice + InpBreakEvenOffsetPips * pip
+                           : meta.entryPrice - InpBreakEvenOffsetPips * pip);
+   if(meta.stopLoss > 0.0 &&
+      MathAbs(meta.stopLoss - breakEvenStop) <= tolerance + 1e-8)
+      meta.lastStopReason = STOP_UPDATE_BREAK_EVEN;
+
+   int index = FindTradeMetadataIndex(ticket);
+   if(index >= 0)
+      g_tradeMetadata[index] = meta;
+   else
+     {
+      int size = ArraySize(g_tradeMetadata);
+      ArrayResize(g_tradeMetadata, size + 1);
+      g_tradeMetadata[size] = meta;
+     }
+  }
+
+void UpdateTradeStopMetadata(const int ticket,
+                             const double newStop,
+                             const StopUpdateReason reason)
+  {
+   int index = FindTradeMetadataIndex(ticket);
+   if(index < 0)
+      return;
+
+   g_tradeMetadata[index].stopLoss = newStop;
+   if(reason != STOP_UPDATE_NONE)
+      g_tradeMetadata[index].lastStopReason = reason;
+  }
+
+void RemoveTradeMetadata(const int ticket)
+  {
+   int index = FindTradeMetadataIndex(ticket);
+   if(index < 0)
+      return;
+
+   int last = ArraySize(g_tradeMetadata) - 1;
+   if(index != last && last >= 0)
+      g_tradeMetadata[index] = g_tradeMetadata[last];
+   if(last >= 0)
+      ArrayResize(g_tradeMetadata, last);
+  }
+
+void InitialiseTradeMetadata()
+  {
+   ArrayResize(g_tradeMetadata, 0);
+
+   double pip = PipSize();
+   double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
+
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+      if(OrderSymbol() != Symbol())
+         continue;
+
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+         continue;
+
+      int direction = (orderType == OP_BUY ? 1 : -1);
+      TradeMetadata meta;
+      meta.ticket         = OrderTicket();
+      meta.entryPrice     = OrderOpenPrice();
+      meta.stopLoss       = OrderStopLoss();
+      meta.takeProfit     = OrderTakeProfit();
+      meta.direction      = direction;
+      meta.lastStopReason = STOP_UPDATE_INITIAL;
+
+      double breakEvenStop = (direction > 0
+                              ? meta.entryPrice + InpBreakEvenOffsetPips * pip
+                              : meta.entryPrice - InpBreakEvenOffsetPips * pip);
+      if(meta.stopLoss > 0.0 &&
+         MathAbs(meta.stopLoss - breakEvenStop) <= tolerance + 1e-8)
+         meta.lastStopReason = STOP_UPDATE_BREAK_EVEN;
+
+      int size = ArraySize(g_tradeMetadata);
+      ArrayResize(g_tradeMetadata, size + 1);
+      g_tradeMetadata[size] = meta;
+     }
+  }
+
 //+------------------------------------------------------------------+
 //| Utility: ensure result log header exists                         |
 //+------------------------------------------------------------------+
@@ -1152,7 +1282,8 @@ bool EnsureResultLogHeader()
                 "swap",
                 "commission",
                 "net",
-                "pips");
+                "pips",
+                "exit_reason");
       FileClose(handle);
       return(true);
      }
@@ -1175,7 +1306,8 @@ bool EnsureResultLogHeader()
                 "swap",
                 "commission",
                 "net",
-                "pips");
+                "pips",
+                "exit_reason");
      }
    FileClose(handle);
    return(true);
@@ -1200,32 +1332,49 @@ void LoadLoggedExitTickets()
       return;
      }
 
-   for(int i = 0; i < RESULT_LOG_COLUMNS && !FileIsEnding(handle); i++)
+   // Skip header line (supports legacy column counts)
+   while(!FileIsEnding(handle))
+     {
       FileReadString(handle);
+      if(FileIsLineEnding(handle))
+         break;
+     }
 
    while(!FileIsEnding(handle))
      {
-      string fields[RESULT_LOG_COLUMNS];
-      bool   rowComplete = true;
-      for(int col = 0; col < RESULT_LOG_COLUMNS; col++)
+      string rowFields[];
+      ArrayResize(rowFields, 0);
+      bool rowRead = false;
+
+      while(!FileIsEnding(handle))
         {
-         if(FileIsEnding(handle))
-           {
-            rowComplete = false;
+         string value = FileReadString(handle);
+         int size = ArraySize(rowFields);
+         ArrayResize(rowFields, size + 1);
+         rowFields[size] = value;
+         rowRead = true;
+
+         if(FileIsLineEnding(handle))
             break;
-           }
-         fields[col] = FileReadString(handle);
         }
 
-      if(!rowComplete)
+      if(!rowRead)
          break;
 
-      if(StringLen(fields[0]) == 0 && StringLen(fields[1]) == 0)
+      if(ArraySize(rowFields) == 0)
          continue;
 
-      if(fields[1] == "EXIT")
+      string eventValue = (ArraySize(rowFields) > 1 ? rowFields[1] : "");
+      if(StringLen(eventValue) == 0)
+         continue;
+
+      if(eventValue == "EXIT")
         {
-         int ticket = (int)StringToInteger(fields[6]);
+         string ticketText = (ArraySize(rowFields) > 6 ? rowFields[6] : "");
+         if(StringLen(ticketText) == 0)
+            continue;
+
+         int ticket = (int)StringToInteger(ticketText);
          int size   = ArraySize(g_exitLoggedTickets);
          ArrayResize(g_exitLoggedTickets, size + 1);
          g_exitLoggedTickets[size] = ticket;
@@ -1274,7 +1423,8 @@ void LogTradeEvent(const StrategyState &state,
                    const double commissionValue,
                    const double netProfit,
                    const double pipsValue,
-                   const datetime eventTime)
+                   const datetime eventTime,
+                   const string exitReason)
   {
    int handle = FileOpen(g_resultLogFileName,
                          FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1302,6 +1452,7 @@ void LogTradeEvent(const StrategyState &state,
    string commissionText = (commissionValue == EMPTY_VALUE ? "" : DoubleToString(commissionValue, 2));
    string netText        = (netProfit == EMPTY_VALUE ? "" : DoubleToString(netProfit, 2));
    string pipsText       = (pipsValue == EMPTY_VALUE ? "" : DoubleToString(pipsValue, 1));
+   string reasonText     = exitReason;
 
    FileWrite(handle,
              TimeToString(eventTime, TIME_DATE | TIME_SECONDS),
@@ -1319,7 +1470,8 @@ void LogTradeEvent(const StrategyState &state,
              swapText,
              commissionText,
              netText,
-             pipsText);
+             pipsText,
+             reasonText);
 
    FileClose(handle);
   }
@@ -1500,21 +1652,23 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
 
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
-      LogEntry(state, direction, ticket, OrderOpenPrice(), atrValue, indicatorValue);
-      LogTradeEvent(state,
-                    "ENTRY",
-                    direction,
-                    ticket,
-                    OrderLots(),
-                    OrderOpenPrice(),
-                    atrValue,
-                    indicatorValue,
+     LogEntry(state, direction, ticket, OrderOpenPrice(), atrValue, indicatorValue);
+     LogTradeEvent(state,
+                   "ENTRY",
+                   direction,
+                   ticket,
+                   OrderLots(),
+                   OrderOpenPrice(),
+                   atrValue,
+                   indicatorValue,
+                   EMPTY_VALUE,
+                   EMPTY_VALUE,
+                   EMPTY_VALUE,
+                   EMPTY_VALUE,
                     EMPTY_VALUE,
-                    EMPTY_VALUE,
-                    EMPTY_VALUE,
-                    EMPTY_VALUE,
-                    EMPTY_VALUE,
-                    OrderOpenTime());
+                    OrderOpenTime(),
+                    "");
+      RegisterTradeMetadata(ticket, direction);
      }
    else
      {
@@ -1715,8 +1869,59 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
       state.lastBarTime  = signalBarTime;
       state.lastDirection = direction;
       state.lastTradeTime = TimeCurrent();
-      g_strategies[index] = state;
+     g_strategies[index] = state;
+    }
+  }
+
+string DetermineExitReason(const int ticket,
+                           const int direction,
+                           const double openPrice,
+                           const double closePrice,
+                           const double stopLoss,
+                           const double takeProfit,
+                           const double netProfit)
+  {
+   double pip = PipSize();
+   double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
+
+   bool hasTp = (takeProfit > 0.0);
+   bool hasSl = (stopLoss > 0.0);
+   bool hitTp = (hasTp && MathAbs(closePrice - takeProfit) <= tolerance + 1e-8);
+   bool hitSl = (hasSl && MathAbs(closePrice - stopLoss) <= tolerance + 1e-8);
+
+   if(hitTp)
+      return("TAKE_PROFIT");
+
+   if(hitSl)
+     {
+      int metaIndex = FindTradeMetadataIndex(ticket);
+      if(metaIndex >= 0)
+        {
+         StopUpdateReason reason = g_tradeMetadata[metaIndex].lastStopReason;
+         if(reason == STOP_UPDATE_BREAK_EVEN)
+            return("STOP_BREAKEVEN");
+         if(reason == STOP_UPDATE_TRAILING)
+            return("STOP_TRAILING");
+        }
+
+      if(pip > 0.0)
+        {
+         double breakEvenStop = (direction > 0
+                                 ? openPrice + InpBreakEvenOffsetPips * pip
+                                 : openPrice - InpBreakEvenOffsetPips * pip);
+         if(MathAbs(stopLoss - breakEvenStop) <= tolerance + 1e-8)
+            return("STOP_BREAKEVEN");
+        }
+      return("STOP_LOSS");
      }
+
+   if(netProfit > 0.0)
+      return("MANUAL_PROFIT");
+
+   if(netProfit < 0.0)
+      return("MANUAL_LOSS");
+
+   return("MANUAL_FLAT");
   }
 
 //+------------------------------------------------------------------+
@@ -1759,18 +1964,28 @@ void CheckClosedOrders()
          direction = -1;
 
       double volume     = OrderLots();
+      double openPrice  = OrderOpenPrice();
       double closePrice = OrderClosePrice();
+      double stopLoss   = OrderStopLoss();
+      double takeProfit = OrderTakeProfit();
       double atrValue   = iATR(NULL, 0, InpATRPeriod, 0);
       double profit     = OrderProfit();
       double swapValue  = OrderSwap();
       double commission = OrderCommission();
       double netProfit  = profit + swapValue + commission;
+      string exitReason = DetermineExitReason(ticket,
+                                              direction,
+                                              openPrice,
+                                              closePrice,
+                                              stopLoss,
+                                              takeProfit,
+                                              netProfit);
 
       double pipValue = EMPTY_VALUE;
       double pipSize  = PipSize();
       if(pipSize > 0)
         {
-         double diff = OrderClosePrice() - OrderOpenPrice();
+         double diff = closePrice - openPrice;
          pipValue = diff / pipSize;
          if(direction < 0)
             pipValue = -pipValue;
@@ -1789,7 +2004,8 @@ void CheckClosedOrders()
                     commission,
                     netProfit,
                     pipValue,
-                    closeTime);
+                    closeTime,
+                    exitReason);
 
       StrategyState state = g_strategies[stratIndex];
       if(netProfit < 0.0)
@@ -1811,6 +2027,7 @@ void CheckClosedOrders()
       g_strategies[stratIndex] = state;
 
       MarkExitLogged(ticket);
+      RemoveTradeMetadata(ticket);
       processedNew = true;
      }
   }
@@ -1867,6 +2084,7 @@ void ManageOpenPositions(const double atrValue)
       double currentStop = OrderStopLoss();
       double targetStop  = currentStop;
       bool   pendingUpdate = false;
+      StopUpdateReason updateReason = STOP_UPDATE_NONE;
 
       double breakEvenStop = (orderType == OP_BUY
                               ? openPrice + InpBreakEvenOffsetPips * pip
@@ -1888,6 +2106,7 @@ void ManageOpenPositions(const double atrValue)
                  {
                   targetStop = breakEvenStop;
                   pendingUpdate = true;
+                  updateReason = STOP_UPDATE_BREAK_EVEN;
                  }
               }
            }
@@ -1901,6 +2120,7 @@ void ManageOpenPositions(const double atrValue)
                  {
                   targetStop = breakEvenStop;
                   pendingUpdate = true;
+                  updateReason = STOP_UPDATE_BREAK_EVEN;
                  }
               }
            }
@@ -1955,6 +2175,7 @@ void ManageOpenPositions(const double atrValue)
               {
                targetStop = candidate;
                pendingUpdate = true;
+               updateReason = STOP_UPDATE_TRAILING;
               }
            }
          else
@@ -1985,6 +2206,7 @@ void ManageOpenPositions(const double atrValue)
               {
                targetStop = candidate;
                pendingUpdate = true;
+               updateReason = STOP_UPDATE_TRAILING;
               }
            }
         }
@@ -1995,16 +2217,24 @@ void ManageOpenPositions(const double atrValue)
          if(IsTradeContextBusy())
             return;
 
-         if(!OrderModify(OrderTicket(),
+         int ticket = OrderTicket();
+         if(!OrderModify(ticket,
                          OrderOpenPrice(),
                          normalizedStop,
                          OrderTakeProfit(),
                          OrderExpiration()))
            {
             Print("OrderModify failed for ticket ",
-                  OrderTicket(),
+                  ticket,
                   ". Error: ",
                   GetLastError());
+           }
+         else
+           {
+            StopUpdateReason appliedReason = (updateReason == STOP_UPDATE_NONE
+                                              ? STOP_UPDATE_INITIAL
+                                              : updateReason);
+            UpdateTradeStopMetadata(ticket, normalizedStop, appliedReason);
            }
         }
      }
@@ -2246,6 +2476,7 @@ int OnInit()
 
    EnsureResultLogHeader();
    LoadLoggedExitTickets();
+   InitialiseTradeMetadata();
 
    return(INIT_SUCCEEDED);
   }
