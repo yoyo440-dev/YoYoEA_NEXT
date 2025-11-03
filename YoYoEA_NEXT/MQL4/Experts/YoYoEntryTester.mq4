@@ -56,13 +56,13 @@ input int    InpSessionStartHour       = 0;
 input int    InpSessionEndHour         = 24;
 input bool   InpSessionSkipFriday      = false;
 input int    InpFridayCutoffHour       = 21;
-input bool   InpEnableBreakEven        = false;
-input double InpBreakEvenAtrTrigger    = 1.0;
-input int    InpBreakEvenOffsetPips    = 0;
-input bool   InpEnableAtrTrailing      = false;
-input double InpTrailingAtrTrigger     = 1.5;
+input bool   InpEnableBreakEven        = true;
+input double InpBreakEvenAtrTrigger    = 1.6;
+input int    InpBreakEvenOffsetPips    = 3;
+input bool   InpEnableAtrTrailing      = true;
+input double InpTrailingAtrTrigger     = 2.2;
 input double InpTrailingAtrStep        = 1.0;
-input int    InpTrailingMinStepPips    = 1;
+input int    InpTrailingMinStepPips    = 2;
 
 //--- strategy meta definitions
 enum StrategyIndex
