@@ -89,12 +89,11 @@ struct StrategyState
   };
 
 StrategyState g_strategies[STRAT_TOTAL];
-string        g_logFileName;
 string        g_profileLabel;
 string        g_resultLogFileName;
 int           g_exitLoggedTickets[];
 
-#define RESULT_LOG_COLUMNS 17
+#define RESULT_LOG_COLUMNS 18
 
 enum StopUpdateReason
   {
@@ -108,6 +107,7 @@ struct TradeMetadata
   {
    int    ticket;
    double entryPrice;
+   double entryAtr;
    double stopLoss;
    double takeProfit;
    int    direction;
@@ -1220,40 +1220,6 @@ bool ResolveBandSetting(StrategyIndex index,
   }
 
 //+------------------------------------------------------------------+
-//| Utility: write entry info to CSV log                             |
-//+------------------------------------------------------------------+
-void LogEntry(const StrategyState &state,
-              const int direction,
-              const int ticket,
-              const double price,
-              const double atrValue,
-              const double indicatorValue)
-  {
-   int handle = FileOpen(g_logFileName,
-                         FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                         ',');
-   if(handle == INVALID_HANDLE)
-     {
-      Print("Failed to open log file ", g_logFileName, ". Error: ", GetLastError());
-      return;
-     }
-
-   string directionText = (direction > 0 ? "BUY" : "SELL");
-   FileSeek(handle, 0, SEEK_END);
-   FileWrite(handle,
-             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-             Symbol(),
-             g_profileLabel,
-             state.name,
-             directionText,
-             IntegerToString(ticket),
-             DoubleToString(price, Digits),
-             DoubleToString(atrValue, 6),
-             DoubleToString(indicatorValue, 6));
-   FileClose(handle);
-  }
-
-//+------------------------------------------------------------------+
 //| Utility: find strategy index by magic number                     |
 //+------------------------------------------------------------------+
 int FindStrategyIndexByMagic(const int magic)
@@ -1278,6 +1244,7 @@ int FindTradeMetadataIndex(const int ticket)
 
 void RegisterTradeMetadata(const int ticket,
                            const int direction,
+                           const double entryAtrValue,
                            const bool breakEvenEnabled,
                            const double breakEvenAtrTrigger,
                            const int breakEvenOffsetPips,
@@ -1292,6 +1259,7 @@ void RegisterTradeMetadata(const int ticket,
    TradeMetadata meta;
    meta.ticket        = ticket;
    meta.entryPrice    = OrderOpenPrice();
+   meta.entryAtr      = entryAtrValue;
    meta.stopLoss      = OrderStopLoss();
    meta.takeProfit    = OrderTakeProfit();
    meta.direction     = direction;
@@ -1405,6 +1373,7 @@ void InitialiseTradeMetadata()
 
       RegisterTradeMetadata(OrderTicket(),
                             direction,
+                            atrValue,
                             breakEvenEnabled,
                             breakEvenAtrTrigger,
                             breakEvenOffset,
@@ -1445,7 +1414,8 @@ bool EnsureResultLogHeader()
                 "ticket",
                 "volume",
                 "price",
-                "atr",
+                "atr_entry",
+                "atr_exit",
                 "indicator",
                 "profit",
                 "swap",
@@ -1469,7 +1439,8 @@ bool EnsureResultLogHeader()
                 "ticket",
                 "volume",
                 "price",
-                "atr",
+                "atr_entry",
+                "atr_exit",
                 "indicator",
                 "profit",
                 "swap",
@@ -1585,7 +1556,8 @@ void LogTradeEvent(const StrategyState &state,
                    const int ticket,
                    const double volume,
                    const double price,
-                   const double atrValue,
+                   const double entryAtrValue,
+                   const double exitAtrValue,
                    const double indicatorValue,
                    const double profit,
                    const double swapValue,
@@ -1614,7 +1586,8 @@ void LogTradeEvent(const StrategyState &state,
       directionText = "SELL";
 
    string priceText      = (price == EMPTY_VALUE ? "" : DoubleToString(price, Digits));
-   string atrText        = (atrValue == EMPTY_VALUE ? "" : DoubleToString(atrValue, 6));
+   string entryAtrText   = (entryAtrValue == EMPTY_VALUE ? "" : DoubleToString(entryAtrValue, 6));
+   string exitAtrText    = (exitAtrValue == EMPTY_VALUE ? "" : DoubleToString(exitAtrValue, 6));
    string indicatorText  = (indicatorValue == EMPTY_VALUE ? "" : DoubleToString(indicatorValue, 6));
    string profitText     = (profit == EMPTY_VALUE ? "" : DoubleToString(profit, 2));
    string swapText       = (swapValue == EMPTY_VALUE ? "" : DoubleToString(swapValue, 2));
@@ -1636,7 +1609,8 @@ void LogTradeEvent(const StrategyState &state,
              IntegerToString(ticket),
              volumeText,
              priceText,
-             atrText,
+             entryAtrText,
+             exitAtrText,
              indicatorText,
              profitText,
              swapText,
@@ -1858,7 +1832,6 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
 
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
-     LogEntry(state, direction, ticket, OrderOpenPrice(), atrValue, indicatorValue);
      LogTradeEvent(state,
                    "ENTRY",
                    direction,
@@ -1866,6 +1839,7 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
                    OrderLots(),
                    OrderOpenPrice(),
                    atrValue,
+                   EMPTY_VALUE,
                    indicatorValue,
                    EMPTY_VALUE,
                    EMPTY_VALUE,
@@ -1876,6 +1850,7 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
                    "");
       RegisterTradeMetadata(ticket,
                             direction,
+                            atrValue,
                             breakEvenEnabled,
                             breakEvenAtrTrigger,
                             breakEvenOffsetPips,
@@ -2181,6 +2156,11 @@ void CheckClosedOrders()
       else if(OrderType() == OP_SELL)
          direction = -1;
 
+      int metaIndex = FindTradeMetadataIndex(ticket);
+      double entryAtr = EMPTY_VALUE;
+      if(metaIndex >= 0)
+         entryAtr = g_tradeMetadata[metaIndex].entryAtr;
+
       double volume     = OrderLots();
       double openPrice  = OrderOpenPrice();
       double closePrice = OrderClosePrice();
@@ -2224,6 +2204,7 @@ void CheckClosedOrders()
                     ticket,
                     volume,
                     closePrice,
+                    entryAtr,
                     atrValue,
                     EMPTY_VALUE,
                     profit,
@@ -2319,6 +2300,7 @@ void ManageOpenPositions(const double atrValue)
         {
          RegisterTradeMetadata(OrderTicket(),
                                (orderType == OP_BUY ? 1 : -1),
+                               atrValue,
                                breakEvenEnabled,
                                breakEvenAtrTrigger,
                                breakEvenOffsetPips,
@@ -2695,7 +2677,6 @@ int OnInit()
       g_profileLabel = "Default";
 
    string safeProfile = SanitiseProfileName(InpProfileName);
-   g_logFileName      = "EntryLog_" + safeProfile + ".csv";
    g_resultLogFileName = "TradeLog_" + safeProfile + ".csv";
 
    LogInputParameters(safeProfile);
@@ -2709,30 +2690,6 @@ int OnInit()
          PrintFormat("ATR band config could not be applied. Using defaults. (file='%s')", g_bandConfigPath);
       else
          Print("ATR band config disabled via input parameter.");
-     }
-
-   int handle = FileOpen(g_logFileName,
-                         FILE_CSV | FILE_READ | FILE_WRITE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                         ',');
-   if(handle != INVALID_HANDLE)
-     {
-      if(FileSize(handle) == 0)
-         FileWrite(handle,
-                   "timestamp",
-                   "symbol",
-                   "profile",
-                   "strategy",
-                   "direction",
-                   "ticket",
-                   "price",
-                   "atr",
-                   "indicator");
-      FileClose(handle);
-     }
-   else
-     {
-     Print("Failed to initialise log file ", g_logFileName,
-           ". Error: ", GetLastError());
      }
 
    EnsureResultLogHeader();
