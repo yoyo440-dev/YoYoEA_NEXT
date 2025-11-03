@@ -9,6 +9,10 @@ YoYoEA_NEXT は複数ストラテジー（MA、RSI、CCI、MACD、Stochastic）�
   - ATR 値が取得できない場合は自動で pips ベースにフォールバック
   - リスク一定ロット（`InpUseRiskBasedLots`）によるポジションサイズ調整
   - ブローカー制約に合わせたロット正規化と証拠金チェック
+- マルチポジション・ロット制御（v1.23 以降）
+  - `InpMaxPositionsPerStrategy` で各ストラテジーの保有上限を設定し、`InpAllowOppositePositions` と併用して総ポジション数を管理
+  - エクイティ閾値（`InpMultiPositionEquityThreshold`）を下回ると自動的にマルチポジションを停止
+  - 追加の閾値（`InpLotReductionEquityThreshold`, `InpLotReductionFactor`）で資産減少時のロット縮小に対応
 - 稼働ガード
   - 戦略ごとのクールダウン／連敗休止 (`InpCooldownMinutes`, `InpLossStreakPause`, `InpLossPauseMinutes`)
   - 既存ポジションと逆方向のシグナルを抑制 (`InpAllowOppositePositions`)
@@ -21,8 +25,7 @@ YoYoEA_NEXT は複数ストラテジー（MA、RSI、CCI、MACD、Stochastic）�
 - 取引セッションはサーバー時間を基準とし、`InpSessionStartHour` ≤ 時刻 < `InpSessionEndHour` の間のみ発注します。金曜は `InpSessionSkipFriday = true` と `InpFridayCutoffHour` で早期停止が可能です。
 
 ## ログファイル
-- エントリーログ：`EntryLog_<Profile>.csv` – 発注時の価格、ATR、指標値などを追跡
-- トレードログ：`TradeLog_<Profile>.csv` – 決済時の損益、スワップ、コミッション、獲得 pips、`exit_reason`（`TAKE_PROFIT` / `STOP_BREAKEVEN` / `STOP_TRAILING` / `STOP_LOSS` / `MANUAL_*`）を記録。クールダウンや連敗情報の更新にも利用
+- トレードログ：`TradeLog_<Profile>.csv` – ENTRY/EXIT 双方を記録。価格やインジケータ値に加え、`atr_entry` / `atr_exit` 列でそれぞれの ATR を保持し、損益（`net`）、獲得 pips、`exit_reason`（`TAKE_PROFIT` / `STOP_BREAKEVEN` / `STOP_TRAILING` / `STOP_LOSS` / `MANUAL_*`）を追跡
 
 ## ビルドと配置
 1. PowerShell で `Scripts/build_experts.ps1` を実行すると、MQL4/Experts 配下の EA をまとめてコンパイルできます。
@@ -42,4 +45,15 @@ YoYoEA_NEXT は複数ストラテジー（MA、RSI、CCI、MACD、Stochastic）�
 - Mode は GLOBAL/ATR/PIPS を指定し、SL/TP は ATR 倍率または pips 値を入力します。
 - Enable を OFF にすると該当ストラテジーは該当帯域でシグナルを無効化します。
 - サンプル: minAtr,maxAtr,MA_Enable,MA_Mode,... を参照し、必要に応じて帯域を追加してください。
+
+## v1.23 で追加された主な仕様
+- Multi-Position サポート
+  - `InpMaxPositionsPerStrategy` と有効ストラテジー数から総保有上限を算出し、`InpAllowOppositePositions=true` 時に複数ポジションを許可
+  - `InpMultiPositionEquityThreshold` を下回ると自動的にシングルポジション運用へ切り替え
+- ロット縮小ロジック
+  - `InpLotReductionEquityThreshold` で指定したエクイティを割ると、固定ロット運用時に `InpLotReductionFactor` を乗じたロットで発注
+- ログ拡張
+  - TradeLog に `atr_entry` / `atr_exit` 列を追加し、ENTRY/EXIT 両方の ATR 状態を記録。ENTRY ログは廃止済み
+- 互換性
+  - 新パラメータはすべて任意で、既存設定（シングルポジション・固定ロット）のままでも過去バージョンと同じ動作を維持します。
 

@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.22"
+#property version   "1.23"
 #property description "Entry evaluation EA for MA, RSI, CCI, and MACD strategies."
 
 //--- input parameters
@@ -63,6 +63,10 @@ input bool   InpEnableAtrTrailing      = true;
 input double InpTrailingAtrTrigger     = 2.2;
 input double InpTrailingAtrStep        = 1.0;
 input int    InpTrailingMinStepPips    = 2;
+input int    InpMaxPositionsPerStrategy = 1;
+input double InpMultiPositionEquityThreshold = 0.0;
+input double InpLotReductionEquityThreshold  = 0.0;
+input double InpLotReductionFactor           = 1.0;
 
 //--- strategy meta definitions
 enum StrategyIndex
@@ -92,6 +96,10 @@ StrategyState g_strategies[STRAT_TOTAL];
 string        g_profileLabel;
 string        g_resultLogFileName;
 int           g_exitLoggedTickets[];
+int           g_enabledStrategyCount = 0;
+int           g_totalPositionCap     = 1;
+bool          g_multiPositionActive  = false;
+double        g_effectiveLots        = 0.0;
 
 #define RESULT_LOG_COLUMNS 18
 
@@ -443,6 +451,93 @@ bool HasOppositeStrategyPosition(StrategyIndex currentIndex,
      }
 
    return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: count open positions for a given magic number           |
+//+------------------------------------------------------------------+
+int CountOpenPositionsForMagic(const int magic)
+  {
+   int count = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+      if(OrderSymbol() != Symbol())
+         continue;
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+         continue;
+      if(OrderMagicNumber() == magic)
+         count++;
+     }
+   return(count);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: count all strategy positions for current symbol         |
+//+------------------------------------------------------------------+
+int CountTotalOpenStrategyPositions()
+  {
+   int count = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+      if(OrderSymbol() != Symbol())
+         continue;
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+         continue;
+      int magic = OrderMagicNumber();
+      if(FindStrategyIndexByMagic(magic) >= 0)
+         count++;
+     }
+   return(count);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: current total position limit                            |
+//+------------------------------------------------------------------+
+int GetCurrentTotalPositionLimit()
+  {
+   if(!g_multiPositionActive)
+      return(1);
+   if(g_totalPositionCap <= 0)
+      return(1);
+   return(g_totalPositionCap);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: refresh multi-position and lot controls                 |
+//+------------------------------------------------------------------+
+void UpdateDynamicPositionControls()
+  {
+   double equity = AccountEquity();
+
+   bool allowMulti = InpAllowOppositePositions;
+   if(allowMulti && InpMultiPositionEquityThreshold > 0.0)
+     {
+      if(equity < InpMultiPositionEquityThreshold - 1e-8)
+         allowMulti = false;
+     }
+   g_multiPositionActive = allowMulti;
+
+   double lotFactor = InpLotReductionFactor;
+   if(lotFactor <= 0.0)
+      lotFactor = 1.0;
+   if(lotFactor > 1.0)
+      lotFactor = 1.0;
+
+   double lots = InpLots;
+   if(!InpUseRiskBasedLots && InpLotReductionEquityThreshold > 0.0 &&
+      equity < InpLotReductionEquityThreshold - 1e-8)
+     {
+      lots = InpLots * lotFactor;
+     }
+   if(lots <= 0.0)
+      lots = InpLots;
+   g_effectiveLots = lots;
   }
 
 //+------------------------------------------------------------------+
@@ -836,6 +931,13 @@ void LogInputParameters(const string safeProfile)
                InpSessionEndHour,
                BoolToText(InpSessionSkipFriday),
                InpFridayCutoffHour);
+   PrintFormat("Multi-position control: allowOpposite=%s maxPerStrategy=%d equityThreshold=%.2f",
+               BoolToText(InpAllowOppositePositions),
+               InpMaxPositionsPerStrategy,
+               InpMultiPositionEquityThreshold);
+   PrintFormat("Lot reduction: equityThreshold=%.2f factor=%.2f",
+               InpLotReductionEquityThreshold,
+               InpLotReductionFactor);
  }
 
 //+------------------------------------------------------------------+
@@ -1661,7 +1763,23 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
    if(minStopDistance <= 0.0)
       minStopDistance = (pip > 0.0 ? pip : Point);
 
-   double requestedLots  = InpLots;
+   int totalOpenPositions = CountTotalOpenStrategyPositions();
+   if(!g_multiPositionActive)
+     {
+      if(totalOpenPositions >= 1)
+         return(TRADE_ATTEMPT_SKIPPED);
+     }
+   else
+     {
+      if(totalOpenPositions >= GetCurrentTotalPositionLimit())
+         return(TRADE_ATTEMPT_SKIPPED);
+
+      int stratOpen = CountOpenPositionsForMagic(state.magic);
+      if(stratOpen >= InpMaxPositionsPerStrategy)
+         return(TRADE_ATTEMPT_SKIPPED);
+     }
+
+   double requestedLots  = (InpUseRiskBasedLots ? InpLots : g_effectiveLots);
    double normalizedLots = 0.0;
 
    double sl = 0.0;
@@ -2622,6 +2740,18 @@ int OnInit()
        }
     }
 
+  if(InpMaxPositionsPerStrategy < 1)
+    {
+     Print("Max positions per strategy must be at least 1.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
+  if(InpLotReductionFactor < 0.0)
+    {
+     Print("Lot reduction factor must be zero or positive.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
   g_strategies[STRAT_MA].name  = "MA_CROSS";
    g_strategies[STRAT_MA].comment = "MA";
    g_strategies[STRAT_MA].magic = 10101;
@@ -2672,12 +2802,28 @@ int OnInit()
    g_strategies[STRAT_STOCH].lossStreak = 0;
    g_strategies[STRAT_STOCH].lossPauseUntil = 0;
 
+   g_enabledStrategyCount = 0;
+   for(int stratIdx = 0; stratIdx < STRAT_TOTAL; stratIdx++)
+     {
+      if(g_strategies[stratIdx].enabled)
+         g_enabledStrategyCount++;
+     }
+
+   int activeStrategies = g_enabledStrategyCount;
+   if(activeStrategies <= 0)
+      activeStrategies = STRAT_TOTAL;
+   g_totalPositionCap = InpMaxPositionsPerStrategy * activeStrategies;
+   if(g_totalPositionCap < 1)
+      g_totalPositionCap = 1;
+
    g_profileLabel = StringTrimLeft(StringTrimRight(InpProfileName));
    if(StringLen(g_profileLabel) == 0)
       g_profileLabel = "Default";
 
    string safeProfile = SanitiseProfileName(InpProfileName);
    g_resultLogFileName = "TradeLog_" + safeProfile + ".csv";
+
+   UpdateDynamicPositionControls();
 
    LogInputParameters(safeProfile);
 
@@ -2706,6 +2852,8 @@ void OnTick()
   {
    if(Bars < 200)
       return;
+
+   UpdateDynamicPositionControls();
 
    double atrValue = iATR(NULL, 0, InpATRPeriod, 1);
 
