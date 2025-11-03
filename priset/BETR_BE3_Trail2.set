@@ -1,5 +1,5 @@
 [Inputs]
-InpProfileName=BETR_BE
+InpProfileName=BETR_BE3_Trail2
 InpLots=0.1
 InpStopLossPips=50
 InpTakeProfitPips=50
@@ -44,9 +44,9 @@ InpSessionEndHour=24
 InpSessionSkipFriday=false
 InpFridayCutoffHour=21
 InpEnableBreakEven=true
-InpBreakEvenAtrTrigger=1.6
+InpBreakEvenAtrTrigger=1.4
 InpBreakEvenOffsetPips=3
 InpEnableAtrTrailing=true
-InpTrailingAtrTrigger=2.2
-InpTrailingAtrStep=1.0
+InpTrailingAtrTrigger=1.7
+InpTrailingAtrStep=0.7
 InpTrailingMinStepPips=2

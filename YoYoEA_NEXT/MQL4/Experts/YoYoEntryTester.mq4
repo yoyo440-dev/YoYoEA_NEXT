@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.21"
+#property version   "1.22"
 #property description "Entry evaluation EA for MA, RSI, CCI, and MACD strategies."
 
 //--- input parameters
@@ -10,8 +10,8 @@ input int    InpTakeProfitPips  = 50;
 input int    InpSlippage        = 3;
 
 input bool   InpEnableMA        = true;
-input bool   InpEnableRSI       = true;
 input bool   InpEnableCCI       = true;
+input bool   InpEnableRSI       = true;
 input bool   InpEnableMACD      = true;
 input bool   InpEnableStoch     = true;
 input bool   InpUseATRStops     = false;
@@ -112,6 +112,13 @@ struct TradeMetadata
    double takeProfit;
    int    direction;
    StopUpdateReason lastStopReason;
+   bool   breakEvenEnabled;
+   double breakEvenAtrTrigger;
+   int    breakEvenOffsetPips;
+   bool   trailingEnabled;
+   double trailingAtrTrigger;
+   double trailingAtrStep;
+   int    trailingMinStepPips;
   };
 
 TradeMetadata g_tradeMetadata[];
@@ -139,6 +146,13 @@ struct StrategyBandSetting
    double   atrTakeProfitMultiplier;
    int      stopLossPips;
    int      takeProfitPips;
+   bool     breakEvenEnabled;
+   double   breakEvenAtrTrigger;
+   int      breakEvenOffsetPips;
+   bool     trailingEnabled;
+   double   trailingAtrTrigger;
+   double   trailingAtrStep;
+   int      trailingMinStepPips;
   };
 
 struct BandConfig
@@ -539,6 +553,13 @@ void InitStrategyBandSetting(StrategyBandSetting &setting)
    setting.atrTakeProfitMultiplier  = -1.0;
    setting.stopLossPips             = -1;
    setting.takeProfitPips           = -1;
+   setting.breakEvenEnabled         = false;
+   setting.breakEvenAtrTrigger      = -1.0;
+   setting.breakEvenOffsetPips      = -1;
+   setting.trailingEnabled          = false;
+   setting.trailingAtrTrigger       = -1.0;
+   setting.trailingAtrStep          = -1.0;
+   setting.trailingMinStepPips      = -1;
   }
 
 //+------------------------------------------------------------------+
@@ -717,6 +738,14 @@ void LogStrategyBandSetting(const string bandLabel,
                  " tpPips=" + IntegerToString(setting.takeProfitPips);
      }
 
+   message += " BE=" + BoolToText(setting.breakEvenEnabled) +
+              " beAtr=" + DoubleToString(setting.breakEvenAtrTrigger, 4) +
+              " beOffset=" + IntegerToString(setting.breakEvenOffsetPips) +
+              " Trail=" + BoolToText(setting.trailingEnabled) +
+              " trailAtr=" + DoubleToString(setting.trailingAtrTrigger, 4) +
+              " trailStep=" + DoubleToString(setting.trailingAtrStep, 4) +
+              " trailMin=" + IntegerToString(setting.trailingMinStepPips);
+
    Print(message);
   }
 
@@ -816,17 +845,38 @@ void ApplyBandSetting(StrategyBandSetting &setting,
                       const string enableText,
                       const string modeText,
                       const string slText,
-                      const string tpText)
+                      const string tpText,
+                      const string breakEvenEnableText,
+                      const string breakEvenAtrText,
+                      const string breakEvenOffsetText,
+                      const string trailingEnableText,
+                      const string trailingAtrText,
+                      const string trailingStepText,
+                      const string trailingMinStepText)
   {
    string trimmedEnable = TrimString(enableText);
    string trimmedMode   = TrimString(modeText);
    string trimmedSl     = TrimString(slText);
    string trimmedTp     = TrimString(tpText);
+   string trimmedBeEn   = TrimString(breakEvenEnableText);
+   string trimmedBeAtr  = TrimString(breakEvenAtrText);
+    string trimmedBeOff  = TrimString(breakEvenOffsetText);
+   string trimmedTrEn   = TrimString(trailingEnableText);
+   string trimmedTrAtr  = TrimString(trailingAtrText);
+   string trimmedTrStep = TrimString(trailingStepText);
+   string trimmedTrMin  = TrimString(trailingMinStepText);
 
    bool hasContent = (StringLen(trimmedEnable) > 0 ||
                       StringLen(trimmedMode) > 0 ||
                       StringLen(trimmedSl) > 0 ||
-                      StringLen(trimmedTp) > 0);
+                      StringLen(trimmedTp) > 0 ||
+                      StringLen(trimmedBeEn) > 0 ||
+                      StringLen(trimmedBeAtr) > 0 ||
+                      StringLen(trimmedBeOff) > 0 ||
+                      StringLen(trimmedTrEn) > 0 ||
+                      StringLen(trimmedTrAtr) > 0 ||
+                      StringLen(trimmedTrStep) > 0 ||
+                      StringLen(trimmedTrMin) > 0);
    if(!hasContent)
      {
       setting.configured = false;
@@ -842,6 +892,13 @@ void ApplyBandSetting(StrategyBandSetting &setting,
    setting.atrTakeProfitMultiplier = -1.0;
    setting.stopLossPips            = -1;
    setting.takeProfitPips          = -1;
+   setting.breakEvenEnabled        = ParseBoolValue(trimmedBeEn, false);
+   setting.breakEvenAtrTrigger     = -1.0;
+   setting.breakEvenOffsetPips     = -1;
+   setting.trailingEnabled         = ParseBoolValue(trimmedTrEn, false);
+   setting.trailingAtrTrigger      = -1.0;
+   setting.trailingAtrStep         = -1.0;
+   setting.trailingMinStepPips     = -1;
 
    if(setting.mode == STOP_MODE_ATR)
      {
@@ -860,13 +917,33 @@ void ApplyBandSetting(StrategyBandSetting &setting,
          setting.takeProfitPips = ivalue;
      }
 
-   PrintFormat("ApplyBandSetting result: enableText='%s' -> %s modeText='%s' -> %s slText='%s' tpText='%s'",
+   double parsedDouble = 0.0;
+   int parsedInt       = 0;
+   if(ParseDoubleValue(trimmedBeAtr, parsedDouble))
+      setting.breakEvenAtrTrigger = parsedDouble;
+   if(ParseIntValue(trimmedBeOff, parsedInt))
+      setting.breakEvenOffsetPips = parsedInt;
+   if(ParseDoubleValue(trimmedTrAtr, parsedDouble))
+      setting.trailingAtrTrigger = parsedDouble;
+   if(ParseDoubleValue(trimmedTrStep, parsedDouble))
+      setting.trailingAtrStep = parsedDouble;
+   if(ParseIntValue(trimmedTrMin, parsedInt))
+      setting.trailingMinStepPips = parsedInt;
+
+   PrintFormat("ApplyBandSetting result: enableText='%s' -> %s modeText='%s' -> %s slText='%s' tpText='%s' beEnable='%s' beAtr='%s' beOffset='%s' trEnable='%s' trAtr='%s' trStep='%s' trMin='%s'",
                trimmedEnable,
                BoolToText(setting.enabled),
                trimmedMode,
                StopModeToText(setting.mode),
                trimmedSl,
-               trimmedTp);
+               trimmedTp,
+               trimmedBeEn,
+               trimmedBeAtr,
+               trimmedBeOff,
+               trimmedTrEn,
+               trimmedTrAtr,
+               trimmedTrStep,
+               trimmedTrMin);
   }
 
 //+------------------------------------------------------------------+
@@ -900,13 +977,13 @@ bool LoadAtrBandConfig(const string safeProfile)
      }
 
    bool headerConsumed = false;
-   int  loadedRows     = 0;
-   const int columnsPerStrategy = 4;
-   int strategyColumnIndex[];
-   ArrayResize(strategyColumnIndex, STRAT_TOTAL * columnsPerStrategy);
-   for(int strat = 0; strat < STRAT_TOTAL; strat++)
-     {
-      for(int offset = 0; offset < columnsPerStrategy; offset++)
+  int  loadedRows     = 0;
+  const int columnsPerStrategy = 11;
+  int strategyColumnIndex[];
+  ArrayResize(strategyColumnIndex, STRAT_TOTAL * columnsPerStrategy);
+  for(int strat = 0; strat < STRAT_TOTAL; strat++)
+    {
+     for(int offset = 0; offset < columnsPerStrategy; offset++)
         {
          int idx = 2 + (strat * columnsPerStrategy) + offset;
          strategyColumnIndex[(strat * columnsPerStrategy) + offset] = idx;
@@ -947,18 +1024,35 @@ bool LoadAtrBandConfig(const string safeProfile)
             for(int col = 0; col < columnCount; col++)
               {
                string header = TrimString(columns[col]);
-               for(int strat = 0; strat < STRAT_TOTAL; strat++)
-                 {
-                  string prefix = g_strategyCsvPrefixes[strat];
-                  if(HeaderKeyEquals(header, prefix, "ENABLE"))
-                     strategyColumnIndex[(strat * columnsPerStrategy) + 0] = col;
-                  else if(HeaderKeyEquals(header, prefix, "MODE"))
-                     strategyColumnIndex[(strat * columnsPerStrategy) + 1] = col;
-                  else if(HeaderKeyEquals(header, prefix, "SL"))
-                     strategyColumnIndex[(strat * columnsPerStrategy) + 2] = col;
-                  else if(HeaderKeyEquals(header, prefix, "TP"))
+              for(int strat = 0; strat < STRAT_TOTAL; strat++)
+                {
+                 string prefix = g_strategyCsvPrefixes[strat];
+                 if(HeaderKeyEquals(header, prefix, "ENABLE"))
+                    strategyColumnIndex[(strat * columnsPerStrategy) + 0] = col;
+                 else if(HeaderKeyEquals(header, prefix, "MODE"))
+                    strategyColumnIndex[(strat * columnsPerStrategy) + 1] = col;
+                 else if(HeaderKeyEquals(header, prefix, "SL"))
+                    strategyColumnIndex[(strat * columnsPerStrategy) + 2] = col;
+                 else if(HeaderKeyEquals(header, prefix, "TP"))
                      strategyColumnIndex[(strat * columnsPerStrategy) + 3] = col;
-                 }
+                  else if(HeaderKeyEquals(header, prefix, "BE_ENABLE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 4] = col;
+                  else if(HeaderKeyEquals(header, prefix, "BE_ATR") ||
+                          HeaderKeyEquals(header, prefix, "BE_TRIGGER"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 5] = col;
+                  else if(HeaderKeyEquals(header, prefix, "BE_OFFSET"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 6] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TRAIL_ENABLE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 7] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TRAIL_ATR") ||
+                          HeaderKeyEquals(header, prefix, "TRAIL_TRIGGER"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 8] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TRAIL_STEP"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 9] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TRAIL_MIN") ||
+                          HeaderKeyEquals(header, prefix, "TRAIL_MIN_STEP"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 10] = col;
+                }
               }
 
             for(int strat = 0; strat < STRAT_TOTAL; strat++)
@@ -1006,11 +1100,25 @@ bool LoadAtrBandConfig(const string safeProfile)
          string modeText   = "";
          string slText     = "";
          string tpText     = "";
+         string beEnableText = "";
+         string beAtrText    = "";
+         string beOffsetText = "";
+         string trEnableText = "";
+         string trAtrText    = "";
+         string trStepText   = "";
+         string trMinText    = "";
 
          int enableIndex = strategyColumnIndex[baseOffset];
          int modeIndex   = strategyColumnIndex[baseOffset + 1];
          int slIndex     = strategyColumnIndex[baseOffset + 2];
          int tpIndex     = strategyColumnIndex[baseOffset + 3];
+         int beEnableIndex = strategyColumnIndex[baseOffset + 4];
+         int beAtrIndex    = strategyColumnIndex[baseOffset + 5];
+         int beOffsetIndex = strategyColumnIndex[baseOffset + 6];
+         int trEnableIndex = strategyColumnIndex[baseOffset + 7];
+         int trAtrIndex    = strategyColumnIndex[baseOffset + 8];
+         int trStepIndex   = strategyColumnIndex[baseOffset + 9];
+         int trMinIndex    = strategyColumnIndex[baseOffset + 10];
 
          if(enableIndex >= 0 && enableIndex < columnCount)
             enableText = TrimString(columns[enableIndex]);
@@ -1020,12 +1128,33 @@ bool LoadAtrBandConfig(const string safeProfile)
             slText = TrimString(columns[slIndex]);
          if(tpIndex >= 0 && tpIndex < columnCount)
             tpText = TrimString(columns[tpIndex]);
+         if(beEnableIndex >= 0 && beEnableIndex < columnCount)
+            beEnableText = TrimString(columns[beEnableIndex]);
+         if(beAtrIndex >= 0 && beAtrIndex < columnCount)
+            beAtrText = TrimString(columns[beAtrIndex]);
+         if(beOffsetIndex >= 0 && beOffsetIndex < columnCount)
+            beOffsetText = TrimString(columns[beOffsetIndex]);
+         if(trEnableIndex >= 0 && trEnableIndex < columnCount)
+            trEnableText = TrimString(columns[trEnableIndex]);
+         if(trAtrIndex >= 0 && trAtrIndex < columnCount)
+            trAtrText = TrimString(columns[trAtrIndex]);
+         if(trStepIndex >= 0 && trStepIndex < columnCount)
+            trStepText = TrimString(columns[trStepIndex]);
+         if(trMinIndex >= 0 && trMinIndex < columnCount)
+            trMinText = TrimString(columns[trMinIndex]);
 
          ApplyBandSetting(g_bandConfigs[index].strategySettings[strat],
                           enableText,
                           modeText,
                           slText,
-                          tpText);
+                          tpText,
+                          beEnableText,
+                          beAtrText,
+                          beOffsetText,
+                          trEnableText,
+                          trAtrText,
+                          trStepText,
+                          trMinText);
         }
 
       loadedRows++;
@@ -1148,7 +1277,14 @@ int FindTradeMetadataIndex(const int ticket)
   }
 
 void RegisterTradeMetadata(const int ticket,
-                           const int direction)
+                           const int direction,
+                           const bool breakEvenEnabled,
+                           const double breakEvenAtrTrigger,
+                           const int breakEvenOffsetPips,
+                           const bool trailingEnabled,
+                           const double trailingAtrTrigger,
+                           const double trailingAtrStep,
+                           const int trailingMinStepPips)
   {
    if(!OrderSelect(ticket, SELECT_BY_TICKET))
       return;
@@ -1160,12 +1296,19 @@ void RegisterTradeMetadata(const int ticket,
    meta.takeProfit    = OrderTakeProfit();
    meta.direction     = direction;
    meta.lastStopReason = STOP_UPDATE_INITIAL;
+   meta.breakEvenAtrTrigger     = (breakEvenAtrTrigger >= 0.0 ? breakEvenAtrTrigger : InpBreakEvenAtrTrigger);
+   meta.breakEvenOffsetPips     = (breakEvenOffsetPips >= 0 ? breakEvenOffsetPips : InpBreakEvenOffsetPips);
+   meta.breakEvenEnabled        = breakEvenEnabled;
+   meta.trailingAtrTrigger      = (trailingAtrTrigger >= 0.0 ? trailingAtrTrigger : InpTrailingAtrTrigger);
+   meta.trailingAtrStep         = (trailingAtrStep >= 0.0 ? trailingAtrStep : InpTrailingAtrStep);
+   meta.trailingMinStepPips     = (trailingMinStepPips >= 0 ? trailingMinStepPips : InpTrailingMinStepPips);
+   meta.trailingEnabled         = trailingEnabled;
 
    double pip = PipSize();
    double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
    double breakEvenStop = (direction > 0
-                           ? meta.entryPrice + InpBreakEvenOffsetPips * pip
-                           : meta.entryPrice - InpBreakEvenOffsetPips * pip);
+                           ? meta.entryPrice + meta.breakEvenOffsetPips * pip
+                           : meta.entryPrice - meta.breakEvenOffsetPips * pip);
    if(meta.stopLoss > 0.0 &&
       MathAbs(meta.stopLoss - breakEvenStop) <= tolerance + 1e-8)
       meta.lastStopReason = STOP_UPDATE_BREAK_EVEN;
@@ -1213,6 +1356,7 @@ void InitialiseTradeMetadata()
 
    double pip = PipSize();
    double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
+   double atrValue = iATR(NULL, 0, InpATRPeriod, 1);
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
@@ -1226,24 +1370,49 @@ void InitialiseTradeMetadata()
          continue;
 
       int direction = (orderType == OP_BUY ? 1 : -1);
-      TradeMetadata meta;
-      meta.ticket         = OrderTicket();
-      meta.entryPrice     = OrderOpenPrice();
-      meta.stopLoss       = OrderStopLoss();
-      meta.takeProfit     = OrderTakeProfit();
-      meta.direction      = direction;
-      meta.lastStopReason = STOP_UPDATE_INITIAL;
+      int magic = OrderMagicNumber();
+      int stratIndex = FindStrategyIndexByMagic(magic);
 
-      double breakEvenStop = (direction > 0
-                              ? meta.entryPrice + InpBreakEvenOffsetPips * pip
-                              : meta.entryPrice - InpBreakEvenOffsetPips * pip);
-      if(meta.stopLoss > 0.0 &&
-         MathAbs(meta.stopLoss - breakEvenStop) <= tolerance + 1e-8)
-         meta.lastStopReason = STOP_UPDATE_BREAK_EVEN;
+      bool   breakEvenEnabled    = InpEnableBreakEven;
+      double breakEvenAtrTrigger = InpBreakEvenAtrTrigger;
+      int    breakEvenOffset     = InpBreakEvenOffsetPips;
+      bool   trailingEnabled     = InpEnableAtrTrailing;
+      double trailingAtrTrigger  = InpTrailingAtrTrigger;
+      double trailingAtrStep     = InpTrailingAtrStep;
+      int    trailingMinStep     = InpTrailingMinStepPips;
 
-      int size = ArraySize(g_tradeMetadata);
-      ArrayResize(g_tradeMetadata, size + 1);
-      g_tradeMetadata[size] = meta;
+      if(stratIndex >= 0)
+        {
+         StrategyBandSetting bandSetting;
+         InitStrategyBandSetting(bandSetting);
+         if(ResolveBandSetting((StrategyIndex)stratIndex, atrValue, bandSetting))
+           {
+            if(bandSetting.breakEvenAtrTrigger >= 0.0)
+               breakEvenAtrTrigger = bandSetting.breakEvenAtrTrigger;
+            if(bandSetting.breakEvenOffsetPips >= 0)
+               breakEvenOffset = bandSetting.breakEvenOffsetPips;
+            breakEvenEnabled = bandSetting.breakEvenEnabled;
+
+            if(bandSetting.trailingAtrTrigger >= 0.0)
+               trailingAtrTrigger = bandSetting.trailingAtrTrigger;
+            if(bandSetting.trailingAtrStep >= 0.0)
+               trailingAtrStep = bandSetting.trailingAtrStep;
+            if(bandSetting.trailingMinStepPips >= 0)
+               trailingMinStep = bandSetting.trailingMinStepPips;
+            trailingEnabled = bandSetting.trailingEnabled;
+           }
+        }
+
+      RegisterTradeMetadata(OrderTicket(),
+                            direction,
+                            breakEvenEnabled,
+                            breakEvenAtrTrigger,
+                            breakEvenOffset,
+                            trailingEnabled,
+                            trailingAtrTrigger,
+                            trailingAtrStep,
+                            trailingMinStep);
+
      }
   }
 
@@ -1452,6 +1621,9 @@ void LogTradeEvent(const StrategyState &state,
    string commissionText = (commissionValue == EMPTY_VALUE ? "" : DoubleToString(commissionValue, 2));
    string netText        = (netProfit == EMPTY_VALUE ? "" : DoubleToString(netProfit, 2));
    string pipsText       = (pipsValue == EMPTY_VALUE ? "" : DoubleToString(pipsValue, 1));
+   double lotStep        = MarketInfo(Symbol(), MODE_LOTSTEP);
+   int    volumeDigits   = StepToDigits(lotStep);
+   string volumeText     = (volume == EMPTY_VALUE ? "" : DoubleToString(volume, volumeDigits));
    string reasonText     = exitReason;
 
    FileWrite(handle,
@@ -1462,7 +1634,7 @@ void LogTradeEvent(const StrategyState &state,
              state.name,
              directionText,
              IntegerToString(ticket),
-             DoubleToString(volume, 2),
+             volumeText,
              priceText,
              atrText,
              indicatorText,
@@ -1511,6 +1683,10 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
    double price = (cmd == OP_BUY ? Ask : Bid);
    double pip   = PipSize();
 
+   double minStopDistance = GetMinimumStopDistance();
+   if(minStopDistance <= 0.0)
+      minStopDistance = (pip > 0.0 ? pip : Point);
+
    double requestedLots  = InpLots;
    double normalizedLots = 0.0;
 
@@ -1523,6 +1699,13 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
    double atrTakeProfitMultiplier  = InpATRTakeProfitMultiplier;
    int    stopLossPips             = InpStopLossPips;
    int    takeProfitPips           = InpTakeProfitPips;
+   bool   breakEvenEnabled         = InpEnableBreakEven;
+   double breakEvenAtrTrigger      = InpBreakEvenAtrTrigger;
+   int    breakEvenOffsetPips      = InpBreakEvenOffsetPips;
+   bool   trailingEnabled          = InpEnableAtrTrailing;
+   double trailingAtrTrigger       = InpTrailingAtrTrigger;
+   double trailingAtrStep          = InpTrailingAtrStep;
+   int    trailingMinStepPips      = InpTrailingMinStepPips;
 
    if(hasBandSetting && bandSetting.configured)
      {
@@ -1542,6 +1725,18 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
          if(bandSetting.takeProfitPips >= 0)
             takeProfitPips = bandSetting.takeProfitPips;
         }
+      breakEvenEnabled = bandSetting.breakEvenEnabled;
+      if(bandSetting.breakEvenAtrTrigger >= 0.0)
+         breakEvenAtrTrigger = bandSetting.breakEvenAtrTrigger;
+      if(bandSetting.breakEvenOffsetPips >= 0)
+         breakEvenOffsetPips = bandSetting.breakEvenOffsetPips;
+      trailingEnabled = bandSetting.trailingEnabled;
+      if(bandSetting.trailingAtrTrigger >= 0.0)
+         trailingAtrTrigger = bandSetting.trailingAtrTrigger;
+      if(bandSetting.trailingAtrStep >= 0.0)
+         trailingAtrStep = bandSetting.trailingAtrStep;
+      if(bandSetting.trailingMinStepPips >= 0)
+         trailingMinStepPips = bandSetting.trailingMinStepPips;
      }
 
    if(useAtrStops && atrValue <= 0.0)
@@ -1557,6 +1752,8 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
       if(atrStopMultiplier > 0.0)
         {
          double dist = atrValue * atrStopMultiplier;
+         if(dist < minStopDistance)
+            dist = minStopDistance;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
          if(pip > 0.0)
@@ -1566,6 +1763,8 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
       if(atrTakeProfitMultiplier > 0.0)
         {
          double dist = atrValue * atrTakeProfitMultiplier;
+         if(dist < minStopDistance)
+            dist = minStopDistance;
          tp = (cmd == OP_BUY ? price + dist : price - dist);
          tp = NormalizeDouble(tp, Digits);
         }
@@ -1575,14 +1774,21 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
       if(stopLossPips > 0)
         {
          double dist = stopLossPips * pip;
+         if(dist < minStopDistance)
+            dist = minStopDistance;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
-         stopDistancePips = stopLossPips;
+         if(pip > 0.0)
+            stopDistancePips = dist / pip;
+         else
+            stopDistancePips = stopLossPips;
         }
 
       if(takeProfitPips > 0)
         {
          double dist = takeProfitPips * pip;
+         if(dist < minStopDistance)
+            dist = minStopDistance;
          tp = (cmd == OP_BUY ? price + dist : price - dist);
          tp = NormalizeDouble(tp, Digits);
         }
@@ -1665,10 +1871,18 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
                    EMPTY_VALUE,
                    EMPTY_VALUE,
                    EMPTY_VALUE,
-                    EMPTY_VALUE,
-                    OrderOpenTime(),
-                    "");
-      RegisterTradeMetadata(ticket, direction);
+                   EMPTY_VALUE,
+                   OrderOpenTime(),
+                   "");
+      RegisterTradeMetadata(ticket,
+                            direction,
+                            breakEvenEnabled,
+                            breakEvenAtrTrigger,
+                            breakEvenOffsetPips,
+                            trailingEnabled,
+                            trailingAtrTrigger,
+                            trailingAtrStep,
+                            trailingMinStepPips);
      }
    else
      {
@@ -1892,23 +2106,27 @@ string DetermineExitReason(const int ticket,
    if(hitTp)
       return("TAKE_PROFIT");
 
-   if(hitSl)
+  if(hitSl)
      {
       int metaIndex = FindTradeMetadataIndex(ticket);
+      int beOffsetPips = InpBreakEvenOffsetPips;
       if(metaIndex >= 0)
         {
-         StopUpdateReason reason = g_tradeMetadata[metaIndex].lastStopReason;
+         TradeMetadata meta = g_tradeMetadata[metaIndex];
+         StopUpdateReason reason = meta.lastStopReason;
          if(reason == STOP_UPDATE_BREAK_EVEN)
             return("STOP_BREAKEVEN");
          if(reason == STOP_UPDATE_TRAILING)
             return("STOP_TRAILING");
+         if(meta.breakEvenOffsetPips >= 0)
+            beOffsetPips = meta.breakEvenOffsetPips;
         }
 
       if(pip > 0.0)
         {
          double breakEvenStop = (direction > 0
-                                 ? openPrice + InpBreakEvenOffsetPips * pip
-                                 : openPrice - InpBreakEvenOffsetPips * pip);
+                                 ? openPrice + beOffsetPips * pip
+                                 : openPrice - beOffsetPips * pip);
          if(MathAbs(stopLoss - breakEvenStop) <= tolerance + 1e-8)
             return("STOP_BREAKEVEN");
         }
@@ -1968,7 +2186,16 @@ void CheckClosedOrders()
       double closePrice = OrderClosePrice();
       double stopLoss   = OrderStopLoss();
       double takeProfit = OrderTakeProfit();
-      double atrValue   = iATR(NULL, 0, InpATRPeriod, 0);
+      double atrValue   = EMPTY_VALUE;
+      int    closeShift = iBarShift(NULL, 0, closeTime, false);
+      if(closeShift >= 0 && Bars > 0)
+        {
+         int atrShift = closeShift + 1;
+         if(atrShift >= Bars)
+            atrShift = Bars - 1;
+         if(atrShift >= 0)
+            atrValue = iATR(NULL, 0, InpATRPeriod, atrShift);
+        }
       double profit     = OrderProfit();
       double swapValue  = OrderSwap();
       double commission = OrderCommission();
@@ -2040,9 +2267,6 @@ void ManageOpenPositions(const double atrValue)
    if(atrValue <= 0.0)
       return;
 
-   if(!InpEnableBreakEven && !InpEnableAtrTrailing)
-      return;
-
    double pip = PipSize();
    if(pip <= 0.0)
       return;
@@ -2050,11 +2274,6 @@ void ManageOpenPositions(const double atrValue)
    double minStopDistance = GetMinimumStopDistance();
    if(minStopDistance <= 0.0)
       minStopDistance = pip;
-
-   double breakEvenTriggerDistance = atrValue * InpBreakEvenAtrTrigger;
-   double trailingTriggerDistance  = atrValue * InpTrailingAtrTrigger;
-   double trailingStepDistance     = atrValue * InpTrailingAtrStep;
-   double trailingMinStepDistance  = InpTrailingMinStepPips * pip;
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
@@ -2069,7 +2288,8 @@ void ManageOpenPositions(const double atrValue)
          continue;
 
       int magic = OrderMagicNumber();
-      if(FindStrategyIndexByMagic(magic) < 0)
+      int stratIndex = FindStrategyIndexByMagic(magic);
+      if(stratIndex < 0)
          continue;
 
       RefreshRates();
@@ -2086,13 +2306,58 @@ void ManageOpenPositions(const double atrValue)
       bool   pendingUpdate = false;
       StopUpdateReason updateReason = STOP_UPDATE_NONE;
 
+      int metaIndex = FindTradeMetadataIndex(OrderTicket());
+      bool   breakEvenEnabled    = InpEnableBreakEven;
+      double breakEvenAtrTrigger = InpBreakEvenAtrTrigger;
+      int    breakEvenOffsetPips = InpBreakEvenOffsetPips;
+      bool   trailingEnabled     = InpEnableAtrTrailing;
+      double trailingAtrTrigger  = InpTrailingAtrTrigger;
+      double trailingAtrStep     = InpTrailingAtrStep;
+      int    trailingMinStepPips = InpTrailingMinStepPips;
+
+      if(metaIndex < 0)
+        {
+         RegisterTradeMetadata(OrderTicket(),
+                               (orderType == OP_BUY ? 1 : -1),
+                               breakEvenEnabled,
+                               breakEvenAtrTrigger,
+                               breakEvenOffsetPips,
+                               trailingEnabled,
+                               trailingAtrTrigger,
+                               trailingAtrStep,
+                               trailingMinStepPips);
+         metaIndex = FindTradeMetadataIndex(OrderTicket());
+        }
+
+      if(metaIndex >= 0)
+        {
+         TradeMetadata meta = g_tradeMetadata[metaIndex];
+         breakEvenEnabled     = meta.breakEvenEnabled;
+         breakEvenAtrTrigger  = meta.breakEvenAtrTrigger;
+         breakEvenOffsetPips  = meta.breakEvenOffsetPips;
+         trailingEnabled      = meta.trailingEnabled;
+         trailingAtrTrigger   = meta.trailingAtrTrigger;
+         trailingAtrStep      = meta.trailingAtrStep;
+         trailingMinStepPips  = meta.trailingMinStepPips;
+        }
+
+      if(!breakEvenEnabled && !trailingEnabled)
+         continue;
+
+      double breakEvenTriggerDistance = (breakEvenAtrTrigger > 0.0 ? atrValue * breakEvenAtrTrigger : 0.0);
+      double trailingTriggerDistance  = (trailingAtrTrigger > 0.0 ? atrValue * trailingAtrTrigger : 0.0);
+      double trailingStepDistance     = (trailingAtrStep > 0.0 ? atrValue * trailingAtrStep : 0.0);
+      double trailingMinStepDistance  = trailingMinStepPips * pip;
+      if(trailingMinStepDistance <= 0.0)
+         trailingMinStepDistance = pip;
+
       double breakEvenStop = (orderType == OP_BUY
-                              ? openPrice + InpBreakEvenOffsetPips * pip
-                              : openPrice - InpBreakEvenOffsetPips * pip);
+                              ? openPrice + breakEvenOffsetPips * pip
+                              : openPrice - breakEvenOffsetPips * pip);
       bool breakEvenAvailable = false;
 
-      if(InpEnableBreakEven &&
-         InpBreakEvenAtrTrigger > 0.0 &&
+      if(breakEvenEnabled &&
+         breakEvenAtrTrigger > 0.0 &&
          breakEvenTriggerDistance > 0.0 &&
          profitDistance >= breakEvenTriggerDistance - 1e-8)
         {
@@ -2126,7 +2391,7 @@ void ManageOpenPositions(const double atrValue)
            }
         }
 
-      if(InpEnableBreakEven && currentStop > 0.0)
+      if(breakEvenEnabled && currentStop > 0.0)
         {
          if(orderType == OP_BUY && currentStop >= breakEvenStop - 1e-8)
             breakEvenAvailable = true;
@@ -2134,7 +2399,7 @@ void ManageOpenPositions(const double atrValue)
             breakEvenAvailable = true;
         }
 
-      if(InpEnableAtrTrailing &&
+      if(trailingEnabled &&
          trailingTriggerDistance > 0.0 &&
          trailingStepDistance > 0.0 &&
          profitDistance >= trailingTriggerDistance - 1e-8)
@@ -2154,21 +2419,22 @@ void ManageOpenPositions(const double atrValue)
             if(trailingFloor > maxStop + 1e-8)
                continue;
 
-            double candidate = currentPrice - trailingStepDistance;
-            if(candidate > maxStop)
-               candidate = maxStop;
-            if(candidate < trailingFloor)
-               candidate = trailingFloor;
+           double candidate = currentPrice - trailingStepDistance;
+           if(candidate > maxStop)
+              candidate = maxStop;
+           if(candidate < trailingFloor)
+              candidate = trailingFloor;
+
+            if(candidate < compareStop + trailingMinStepDistance)
+              {
+               candidate = compareStop + trailingMinStepDistance;
+               if(candidate > maxStop)
+                  candidate = maxStop;
+               if(candidate < trailingFloor)
+                  candidate = trailingFloor;
+              }
 
             if(candidate < trailingFloor - 1e-8 || candidate > maxStop + 1e-8)
-               continue;
-
-            double diff = candidate - compareStop;
-            if(compareStop <= 0.0)
-               diff = candidate;
-
-            if(trailingMinStepDistance > 0.0 &&
-               diff < trailingMinStepDistance - 1e-8)
                continue;
 
             if(IsBetterStopLoss(orderType, compareStop, candidate))
@@ -2188,18 +2454,22 @@ void ManageOpenPositions(const double atrValue)
             if(trailingCeiling < minStop - 1e-8)
                continue;
 
-            double candidate = currentPrice + trailingStepDistance;
-            if(candidate < minStop)
-               candidate = minStop;
-            if(candidate > trailingCeiling)
-               candidate = trailingCeiling;
+           double candidate = currentPrice + trailingStepDistance;
+           if(candidate < minStop)
+              candidate = minStop;
+           if(candidate > trailingCeiling)
+              candidate = trailingCeiling;
 
-            if(candidate < minStop - 1e-8 || candidate > trailingCeiling + 1e-8)
-               continue;
+            if(candidate > compareStop - trailingMinStepDistance)
+              {
+               candidate = compareStop - trailingMinStepDistance;
+               if(candidate < minStop)
+                  candidate = minStop;
+               if(candidate > trailingCeiling)
+                  candidate = trailingCeiling;
+              }
 
-            double diff = (compareStop > 0.0 ? compareStop - candidate : candidate);
-            if(trailingMinStepDistance > 0.0 &&
-               diff < trailingMinStepDistance - 1e-8)
+            if(candidate > trailingCeiling + 1e-8 || candidate < minStop - 1e-8)
                continue;
 
             if(IsBetterStopLoss(orderType, compareStop, candidate))
@@ -2211,38 +2481,29 @@ void ManageOpenPositions(const double atrValue)
            }
         }
 
-      if(pendingUpdate)
-        {
-         double normalizedStop = NormalizeDouble(targetStop, Digits);
-         if(IsTradeContextBusy())
-            return;
+      if(!pendingUpdate)
+         continue;
 
-         int ticket = OrderTicket();
-         if(!OrderModify(ticket,
-                         OrderOpenPrice(),
-                         normalizedStop,
-                         OrderTakeProfit(),
-                         OrderExpiration()))
-           {
-            Print("OrderModify failed for ticket ",
-                  ticket,
-                  ". Error: ",
-                  GetLastError());
-           }
-         else
-           {
-            StopUpdateReason appliedReason = (updateReason == STOP_UPDATE_NONE
-                                              ? STOP_UPDATE_INITIAL
-                                              : updateReason);
-            UpdateTradeStopMetadata(ticket, normalizedStop, appliedReason);
-           }
+      double takeProfit = OrderTakeProfit();
+      if(!OrderModify(OrderTicket(),
+                      OrderOpenPrice(),
+                      NormalizeDouble(targetStop, Digits),
+                      takeProfit,
+                      0,
+                      clrNONE))
+        {
+         Print("OrderModify failed for ticket ", OrderTicket(),
+               ". Error: ", GetLastError());
+         continue;
+        }
+      else
+        {
+         UpdateTradeStopMetadata(OrderTicket(), targetStop, updateReason);
         }
      }
   }
 
-//+------------------------------------------------------------------+
-//| Expert initialization                                            |
-//+------------------------------------------------------------------+
+
 int OnInit()
   {
    if(InpLots <= 0.0)
