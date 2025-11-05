@@ -1,16 +1,16 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-`YoYoEA_NEXT/MQL4/Experts/YoYoEntryTester.mq4` hosts the Expert Advisor; keep additional MQL4 modules beside it and guard shared state in `g_*` globals. ATR band definitions live in `YoYoEA_NEXT/Config`, with `{PROFILE}` placeholders that map to `InpProfileName`; retire old variants under `Config/archive`. Strategy Tester presets (.set) sit in `priset/` and mirror the BETR naming. Automation scripts are under `Scripts/`, and `Memo/memo.txt` tracks agent actions—append entries in Japanese with ISO timestamps at every meaningful change.
+## プロジェクト構成とモジュール配置
+EA本体は `YoYoEA_NEXT/MQL4/Experts/YoYoEntryTester.mq4` に配置されています。追加のMQL4モジュールを置く場合も同ディレクトリにまとめ、共有状態は既存の `g_*` グローバル変数を通じて扱ってください。ATRバンド設定CSVは `YoYoEA_NEXT/Config` に保存し、`{PROFILE}` プレースホルダーが `InpProfileName` と連動します。旧設定は `Config/archive` に退避済みです。ストラテジーテスター用プリセット（.set）は `priset/` で BETR_* 命名に統一し、運用スクリプトは `Scripts/` 配下に格納します。作業ログは `Memo/memo.txt` にISO形式タイムスタンプと日本語で追記することをルールとします。
 
-## Build, Test, and Development Commands
-Run `pwsh ./Scripts/compile_YoYoEntryTester.ps1` after adjusting the `metaEditor`, source, and target paths to your local MetaTrader install (default assumes `D:\Rakuten_MT4`). The script copies the `.mq4`, invokes MetaEditor with `/portable`, and drops logs in `D:\EA開発2025_10_26\CompileLog`. Launch MetaTrader via `pwsh ./Scripts/run_Rakuten_MT4.ps1` when you need to refresh data. For ad-hoc builds, call `metaeditor.exe /portable /compile:"<path>\YoYoEntryTester.mq4" /log:"<log>"` directly.
+## ビルド・テスト・開発コマンド
+MetaEditor を利用した一括コンパイルは `pwsh ./Scripts/compile_YoYoEntryTester.ps1` を実行します。スクリプト内の `metaEditor`、ソース、出力パスは Windows 側の MT4 配置に合わせて更新してください（既定値は `D:\Rakuten_MT4` を想定）。実行すると `.mq4` をコピーし、MetaEditor を `/portable` オプションで起動して `D:\EA開発2025_10_26\CompileLog` にログを生成します。MT4 ターミナルの再起動は `pwsh ./Scripts/run_Rakuten_MT4.ps1` を使用します。個別にコンパイルする場合は `metaeditor.exe /portable /compile:"<path>\YoYoEntryTester.mq4" /log:"<log>"` を直接呼び出してください。
 
-## Coding Style & Naming Conventions
-Follow the existing MetaEditor layout: three-space indentation, `CamelCase` function names, `PascalCase` structs, and screaming-snake enums. Prefix new extern inputs with `Inp`, module-level state with `g_`, and constants with `k`. Keep `#property` directives and input groups ordered as in `YoYoEntryTester.mq4:1`. Use banner comments (`//+---`) to delimit sections and mirror the logging phrasing already in place. Name generated CSV artefacts `TradeLog_<Profile>.csv` and ATR configs `AtrBandConfig_<Profile>.csv`.
+## コーディングスタイルと命名規約
+3スペースインデントを徹底し、関数は `CamelCase`、構造体は `PascalCase`、列挙体は大文字スネークで表記します。新規 extern 入力には `Inp`、モジュール内の状態には `g_`、定数には `k` を接頭辞として付与します。`#property` ブロックと入力項目の順序は `YoYoEntryTester.mq4` 冒頭の構成を踏襲し、セクション区切りには `//+------------------------------------------------------------------+` 形式のバナーコメントを利用します。成果物は `TradeLog_<Profile>.csv`、ATR設定は `AtrBandConfig_<Profile>.csv` という命名規約を守ってください。
 
-## Testing Guidelines
-Always backtest with MetaTrader 4’s Strategy Tester (Ctrl+R). Load a baseline preset from `priset/`, point `InpAtrBandConfigFile` to the relevant CSV in `MQL4/Files`, and enable `InpUseAtrBandConfig` when validating ATR bands. After each run, review `TradeLog_<Profile>.csv` in `MQL4/Files` plus the Terminal log to confirm spread filters, multi-position gating, and stop logic updates. Capture key screenshots or CSV snippets for regressions and stash exploratory configs in `Config/archive` once superseded.
+## テスト指針
+バックテストは MetaTrader4 ストラテジーテスター（Ctrl+R）で実施します。まず `priset/` の基準セットを読み込み、ATRバンド検証時は `InpUseAtrBandConfig` を true にして `InpAtrBandConfigFile` を `MQL4/Files` 内の対象CSVへ指定します。テスト後は `TradeLog_<Profile>.csv` とターミナルログでスプレッド制御、マルチポジション制限、ストップ更新の挙動を確認し、役目を終えた検証用CSVは `Config/archive` へ整理してください。回帰確認や共有が必要な場合は、主要スクリーンショットや損益表を併せて保管します。
 
-## Commit & Pull Request Guidelines
-Keep commits small with concise subject lines that match history (`v1.23 マルチポジション対応`, `Add ATR band config variations`). Reference affected strategy or version early in the summary, omit trailing periods, and explain rationale in the body if non-obvious. Pull requests should list tuned parameters, affected config/preset files, the MT4 build used, and attach or link backtest evidence (equity curve plus `TradeLog` delta). Update `Memo/memo.txt` with the actions you took before requesting review so the next agent can pick up context instantly.
+## コミットとプルリクエスト指針
+コミットは粒度を小さく保ち、履歴で使われている書式（例: `v1.23 マルチポジション対応`, `Add ATR band config variations`）に揃えた件名を採用します。要約には影響を与えるストラテジーやバージョンを先頭で示し、背景が分かりにくい変更は本文で補足してください。プルリクエストでは調整したパラメータ、影響する設定ファイルやプリセット、使用した MT4 ビルド、主要バックテスト結果（エクイティカーブや `TradeLog` の差分）を添付します。レビュー依頼前に `Memo/memo.txt` の最新状態を反映し、次の担当者が手順を引き継げるようにしてください。
