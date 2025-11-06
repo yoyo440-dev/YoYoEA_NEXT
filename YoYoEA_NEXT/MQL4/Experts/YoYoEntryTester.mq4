@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.23"
+#property version   "1.24"
 #property description "Entry evaluation EA for MA, RSI, CCI, and MACD strategies."
 
 //--- input parameters
@@ -63,6 +63,8 @@ input bool   InpEnableAtrTrailing      = true;
 input double InpTrailingAtrTrigger     = 2.2;
 input double InpTrailingAtrStep        = 1.0;
 input int    InpTrailingMinStepPips    = 2;
+input bool   InpEnableGlobalMultiPositions = false;
+input int    InpMaxTotalPositions          = 0;
 input int    InpMaxPositionsPerStrategy = 1;
 input double InpMultiPositionEquityThreshold = 0.0;
 input double InpLotReductionEquityThreshold  = 0.0;
@@ -95,13 +97,15 @@ struct StrategyState
 StrategyState g_strategies[STRAT_TOTAL];
 string        g_profileLabel;
 string        g_resultLogFileName;
+string        g_parameterLogFileName;
+string        g_runId;
 int           g_exitLoggedTickets[];
 int           g_enabledStrategyCount = 0;
 int           g_totalPositionCap     = 1;
 bool          g_multiPositionActive  = false;
 double        g_effectiveLots        = 0.0;
 
-#define RESULT_LOG_COLUMNS 18
+#define RESULT_LOG_COLUMNS 19
 
 enum StopUpdateReason
   {
@@ -198,6 +202,22 @@ string SanitiseProfileName(string profile)
         }
      }
    return(profile);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: build per-run identifier for logging                    |
+//+------------------------------------------------------------------+
+string BuildRunIdentifier()
+  {
+   MqlDateTime dt;
+   TimeToStruct(TimeLocal(), dt);
+   return(StringFormat("%04d%02d%02d_%02d%02d%02d",
+                       dt.year,
+                       dt.mon,
+                       dt.day,
+                       dt.hour,
+                       dt.min,
+                       dt.sec));
   }
 
 //+------------------------------------------------------------------+
@@ -497,6 +517,32 @@ int CountTotalOpenStrategyPositions()
   }
 
 //+------------------------------------------------------------------+
+//| Utility: calculate configured total position cap                 |
+//+------------------------------------------------------------------+
+int CalculateConfiguredTotalPositionCap()
+  {
+   int baseCap = 1;
+
+   if(InpEnableGlobalMultiPositions)
+     {
+      if(InpMaxTotalPositions > 0)
+         baseCap = InpMaxTotalPositions;
+      else
+        {
+         int activeStrategies = g_enabledStrategyCount;
+         if(activeStrategies <= 0)
+            activeStrategies = STRAT_TOTAL;
+         baseCap = InpMaxPositionsPerStrategy * activeStrategies;
+        }
+     }
+
+   if(baseCap < 1)
+      baseCap = 1;
+
+   return(baseCap);
+  }
+
+//+------------------------------------------------------------------+
 //| Utility: current total position limit                            |
 //+------------------------------------------------------------------+
 int GetCurrentTotalPositionLimit()
@@ -515,7 +561,12 @@ void UpdateDynamicPositionControls()
   {
    double equity = AccountEquity();
 
-   bool allowMulti = InpAllowOppositePositions;
+   int configuredCap = CalculateConfiguredTotalPositionCap();
+   if(configuredCap < 1)
+      configuredCap = 1;
+   g_totalPositionCap = configuredCap;
+
+   bool allowMulti = (InpEnableGlobalMultiPositions && configuredCap > 1);
    if(allowMulti && InpMultiPositionEquityThreshold > 0.0)
      {
       if(equity < InpMultiPositionEquityThreshold - 1e-8)
@@ -878,11 +929,118 @@ void LogBandConfigurations()
   }
 
 //+------------------------------------------------------------------+
+//| Log helper: write parameter snapshot to dedicated CSV            |
+//+------------------------------------------------------------------+
+void WriteParameterSnapshot(const string safeProfile)
+  {
+   if(StringLen(g_parameterLogFileName) == 0)
+      return;
+
+   int handle = FileOpen(g_parameterLogFileName,
+                         FILE_CSV | FILE_WRITE | FILE_SHARE_READ,
+                         ',');
+   if(handle == INVALID_HANDLE)
+     {
+      Print("Failed to open parameter log file ", g_parameterLogFileName,
+            ". Error: ", GetLastError());
+      return;
+     }
+
+   FileWrite(handle, "param", "value");
+   FileWrite(handle, "run_id", g_runId);
+   FileWrite(handle,
+             "timestamp",
+             TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS));
+   FileWrite(handle, "profile_label", g_profileLabel);
+   FileWrite(handle, "profile_safe_name", safeProfile);
+   FileWrite(handle, "profile_input_name", InpProfileName);
+   FileWrite(handle, "lots", DoubleToString(InpLots, 2));
+   FileWrite(handle, "stop_loss_pips", IntegerToString(InpStopLossPips));
+   FileWrite(handle, "take_profit_pips", IntegerToString(InpTakeProfitPips));
+   FileWrite(handle, "slippage", IntegerToString(InpSlippage));
+   FileWrite(handle, "enable_ma", BoolToText(InpEnableMA));
+   FileWrite(handle, "enable_cci", BoolToText(InpEnableCCI));
+   FileWrite(handle, "enable_rsi", BoolToText(InpEnableRSI));
+   FileWrite(handle, "enable_macd", BoolToText(InpEnableMACD));
+   FileWrite(handle, "enable_stoch", BoolToText(InpEnableStoch));
+   FileWrite(handle, "use_atr_stops", BoolToText(InpUseATRStops));
+   FileWrite(handle, "use_atr_band_config", BoolToText(InpUseAtrBandConfig));
+   FileWrite(handle, "atr_band_config_file", InpAtrBandConfigFile);
+   FileWrite(handle, "atr_period", IntegerToString(InpATRPeriod));
+   FileWrite(handle, "fast_ma_period", IntegerToString(InpFastMAPeriod));
+   FileWrite(handle, "slow_ma_period", IntegerToString(InpSlowMAPeriod));
+   FileWrite(handle, "rsi_period", IntegerToString(InpRSIPeriod));
+   FileWrite(handle, "rsi_buy_level", DoubleToString(InpRSIBuyLevel, 4));
+   FileWrite(handle, "rsi_sell_level", DoubleToString(InpRSISellLevel, 4));
+   FileWrite(handle, "cci_period", IntegerToString(InpCCIPeriod));
+   FileWrite(handle, "cci_upper_level", DoubleToString(InpCCIUpperLevel, 4));
+   FileWrite(handle, "cci_lower_level", DoubleToString(InpCCILowerLevel, 4));
+   FileWrite(handle, "macd_fast_ema", IntegerToString(InpMACDFastEMA));
+   FileWrite(handle, "macd_slow_ema", IntegerToString(InpMACDSlowEMA));
+   FileWrite(handle, "macd_signal_sma", IntegerToString(InpMACDSignalSMA));
+   FileWrite(handle, "stoch_k_period", IntegerToString(InpStochKPeriod));
+   FileWrite(handle, "stoch_d_period", IntegerToString(InpStochDPeriod));
+   FileWrite(handle, "stoch_slowing", IntegerToString(InpStochSlowing));
+   FileWrite(handle, "stoch_buy_level", DoubleToString(InpStochBuyLevel, 4));
+   FileWrite(handle, "stoch_sell_level", DoubleToString(InpStochSellLevel, 4));
+   FileWrite(handle, "atr_stop_multiplier", DoubleToString(InpATRStopMultiplier, 4));
+   FileWrite(handle,
+             "atr_takeprofit_multiplier",
+             DoubleToString(InpATRTakeProfitMultiplier, 4));
+   FileWrite(handle, "max_spread_pips", DoubleToString(InpMaxSpreadPips, 4));
+   FileWrite(handle, "use_risk_based_lots", BoolToText(InpUseRiskBasedLots));
+   FileWrite(handle, "risk_percent", DoubleToString(InpRiskPercent, 4));
+   FileWrite(handle, "cooldown_minutes", IntegerToString(InpCooldownMinutes));
+   FileWrite(handle, "loss_streak_pause", IntegerToString(InpLossStreakPause));
+   FileWrite(handle, "loss_pause_minutes", IntegerToString(InpLossPauseMinutes));
+   FileWrite(handle,
+             "allow_opposite_positions",
+             BoolToText(InpAllowOppositePositions));
+   FileWrite(handle, "use_trading_sessions", BoolToText(InpUseTradingSessions));
+   FileWrite(handle, "session_start_hour", IntegerToString(InpSessionStartHour));
+   FileWrite(handle, "session_end_hour", IntegerToString(InpSessionEndHour));
+   FileWrite(handle, "session_skip_friday", BoolToText(InpSessionSkipFriday));
+   FileWrite(handle, "friday_cutoff_hour", IntegerToString(InpFridayCutoffHour));
+   FileWrite(handle, "enable_break_even", BoolToText(InpEnableBreakEven));
+   FileWrite(handle,
+             "break_even_atr_trigger",
+             DoubleToString(InpBreakEvenAtrTrigger, 4));
+   FileWrite(handle,
+             "break_even_offset_pips",
+             IntegerToString(InpBreakEvenOffsetPips));
+   FileWrite(handle, "enable_atr_trailing", BoolToText(InpEnableAtrTrailing));
+   FileWrite(handle,
+             "trailing_atr_trigger",
+             DoubleToString(InpTrailingAtrTrigger, 4));
+   FileWrite(handle, "trailing_atr_step", DoubleToString(InpTrailingAtrStep, 4));
+   FileWrite(handle,
+             "trailing_min_step_pips",
+             IntegerToString(InpTrailingMinStepPips));
+   FileWrite(handle,
+             "enable_global_multi_positions",
+             BoolToText(InpEnableGlobalMultiPositions));
+   FileWrite(handle, "max_total_positions", IntegerToString(InpMaxTotalPositions));
+   FileWrite(handle,
+             "max_positions_per_strategy",
+             IntegerToString(InpMaxPositionsPerStrategy));
+   FileWrite(handle,
+             "multi_position_equity_threshold",
+             DoubleToString(InpMultiPositionEquityThreshold, 4));
+   FileWrite(handle,
+             "lot_reduction_equity_threshold",
+             DoubleToString(InpLotReductionEquityThreshold, 4));
+   FileWrite(handle, "lot_reduction_factor", DoubleToString(InpLotReductionFactor, 4));
+
+   FileClose(handle);
+  }
+
+//+------------------------------------------------------------------+
 //| Log helper: dump input parameter snapshot                        |
 //+------------------------------------------------------------------+
 void LogInputParameters(const string safeProfile)
   {
    Print("---- YoYoEntryTester Parameter Snapshot ----");
+   PrintFormat("RunId='%s' ParameterLog='%s'", g_runId, g_parameterLogFileName);
    PrintFormat("ProfileLabel='%s' SafeProfile='%s'", g_profileLabel, safeProfile);
    PrintFormat("Lots=%.2f StopLossPips=%d TakeProfitPips=%d Slippage=%d",
                InpLots,
@@ -914,8 +1072,13 @@ void LogInputParameters(const string safeProfile)
                InpCooldownMinutes,
                InpLossStreakPause,
                InpLossPauseMinutes);
-   PrintFormat("Position control: allowOpposite=%s",
-               BoolToText(InpAllowOppositePositions));
+   string maxTotalText = (InpMaxTotalPositions > 0
+                          ? IntegerToString(InpMaxTotalPositions)
+                          : "auto");
+   PrintFormat("Position control: allowOpposite=%s globalMulti=%s maxTotal=%s",
+               BoolToText(InpAllowOppositePositions),
+               BoolToText(InpEnableGlobalMultiPositions),
+               maxTotalText);
    PrintFormat("Break-even: enabled=%s atrTrigger=%.4f offsetPips=%d",
                BoolToText(InpEnableBreakEven),
                InpBreakEvenAtrTrigger,
@@ -931,13 +1094,13 @@ void LogInputParameters(const string safeProfile)
                InpSessionEndHour,
                BoolToText(InpSessionSkipFriday),
                InpFridayCutoffHour);
-   PrintFormat("Multi-position control: allowOpposite=%s maxPerStrategy=%d equityThreshold=%.2f",
-               BoolToText(InpAllowOppositePositions),
+   PrintFormat("Multi-position control: maxPerStrategy=%d equityThreshold=%.2f",
                InpMaxPositionsPerStrategy,
                InpMultiPositionEquityThreshold);
    PrintFormat("Lot reduction: equityThreshold=%.2f factor=%.2f",
                InpLotReductionEquityThreshold,
                InpLotReductionFactor);
+   WriteParameterSnapshot(safeProfile);
  }
 
 //+------------------------------------------------------------------+
@@ -1424,9 +1587,9 @@ void InitialiseTradeMetadata()
   {
    ArrayResize(g_tradeMetadata, 0);
 
-   double pip = PipSize();
-   double tolerance = (pip > 0.0 ? pip * 0.1 : 0.0001);
-   double atrValue = iATR(NULL, 0, InpATRPeriod, 1);
+   double fallbackAtrValue = 0.0;
+   if(Bars > 1)
+      fallbackAtrValue = iATR(NULL, 0, InpATRPeriod, 1);
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
@@ -1451,11 +1614,28 @@ void InitialiseTradeMetadata()
       double trailingAtrStep     = InpTrailingAtrStep;
       int    trailingMinStep     = InpTrailingMinStepPips;
 
+      double entryAtrValue = fallbackAtrValue;
+      datetime openTime = OrderOpenTime();
+      int openShift = iBarShift(NULL, 0, openTime, false);
+      if(openShift >= 0)
+        {
+         int atrShift = openShift + 1;
+         if(atrShift >= Bars)
+            atrShift = Bars - 1;
+         if(atrShift < 0)
+            atrShift = 0;
+         double historicalAtr = iATR(NULL, 0, InpATRPeriod, atrShift);
+         if(historicalAtr > 0.0)
+            entryAtrValue = historicalAtr;
+        }
+      if(entryAtrValue <= 0.0 && fallbackAtrValue > 0.0)
+         entryAtrValue = fallbackAtrValue;
+
       if(stratIndex >= 0)
         {
          StrategyBandSetting bandSetting;
          InitStrategyBandSetting(bandSetting);
-         if(ResolveBandSetting((StrategyIndex)stratIndex, atrValue, bandSetting))
+         if(ResolveBandSetting((StrategyIndex)stratIndex, entryAtrValue, bandSetting))
            {
             if(bandSetting.breakEvenAtrTrigger >= 0.0)
                breakEvenAtrTrigger = bandSetting.breakEvenAtrTrigger;
@@ -1475,7 +1655,7 @@ void InitialiseTradeMetadata()
 
       RegisterTradeMetadata(OrderTicket(),
                             direction,
-                            atrValue,
+                            entryAtrValue,
                             breakEvenEnabled,
                             breakEvenAtrTrigger,
                             breakEvenOffset,
@@ -1508,6 +1688,7 @@ bool EnsureResultLogHeader()
         }
       FileWrite(handle,
                 "timestamp",
+                "run_id",
                 "event",
                 "symbol",
                 "profile",
@@ -1533,6 +1714,7 @@ bool EnsureResultLogHeader()
      {
       FileWrite(handle,
                 "timestamp",
+                "run_id",
                 "event",
                 "symbol",
                 "profile",
@@ -1606,13 +1788,15 @@ void LoadLoggedExitTickets()
       if(ArraySize(rowFields) == 0)
          continue;
 
-      string eventValue = (ArraySize(rowFields) > 1 ? rowFields[1] : "");
+      int eventIndex = (ArraySize(rowFields) >= RESULT_LOG_COLUMNS ? 2 : 1);
+      string eventValue = (ArraySize(rowFields) > eventIndex ? rowFields[eventIndex] : "");
       if(StringLen(eventValue) == 0)
          continue;
 
       if(eventValue == "EXIT")
         {
-         string ticketText = (ArraySize(rowFields) > 6 ? rowFields[6] : "");
+         int ticketIndex = (ArraySize(rowFields) >= RESULT_LOG_COLUMNS ? 7 : 6);
+         string ticketText = (ArraySize(rowFields) > ticketIndex ? rowFields[ticketIndex] : "");
          if(StringLen(ticketText) == 0)
             continue;
 
@@ -1703,6 +1887,7 @@ void LogTradeEvent(const StrategyState &state,
 
    FileWrite(handle,
              TimeToString(eventTime, TIME_DATE | TIME_SECONDS),
+             g_runId,
              eventType,
              Symbol(),
              g_profileLabel,
@@ -1764,20 +1949,13 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
       minStopDistance = (pip > 0.0 ? pip : Point);
 
    int totalOpenPositions = CountTotalOpenStrategyPositions();
-   if(!g_multiPositionActive)
-     {
-      if(totalOpenPositions >= 1)
-         return(TRADE_ATTEMPT_SKIPPED);
-     }
-   else
-     {
-      if(totalOpenPositions >= GetCurrentTotalPositionLimit())
-         return(TRADE_ATTEMPT_SKIPPED);
+   int totalLimit = GetCurrentTotalPositionLimit();
+   if(totalLimit > 0 && totalOpenPositions >= totalLimit)
+      return(TRADE_ATTEMPT_SKIPPED);
 
-      int stratOpen = CountOpenPositionsForMagic(state.magic);
-      if(stratOpen >= InpMaxPositionsPerStrategy)
-         return(TRADE_ATTEMPT_SKIPPED);
-     }
+   int stratOpen = CountOpenPositionsForMagic(state.magic);
+   if(stratOpen >= InpMaxPositionsPerStrategy)
+      return(TRADE_ATTEMPT_SKIPPED);
 
    double requestedLots  = (InpUseRiskBasedLots ? InpLots : g_effectiveLots);
    double normalizedLots = 0.0;
@@ -2155,7 +2333,7 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
    if(state.lastBarTime == signalBarTime && state.lastDirection == direction)
       return;
 
-   if(HasOpenPosition(state))
+   if(!g_multiPositionActive && HasOpenPosition(state))
       return;
 
    if(IsTradeContextBusy())
@@ -2740,6 +2918,12 @@ int OnInit()
        }
     }
 
+  if(InpMaxTotalPositions < 0)
+    {
+     Print("Max total positions must be zero or positive.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
   if(InpMaxPositionsPerStrategy < 1)
     {
      Print("Max positions per strategy must be at least 1.");
@@ -2809,19 +2993,15 @@ int OnInit()
          g_enabledStrategyCount++;
      }
 
-   int activeStrategies = g_enabledStrategyCount;
-   if(activeStrategies <= 0)
-      activeStrategies = STRAT_TOTAL;
-   g_totalPositionCap = InpMaxPositionsPerStrategy * activeStrategies;
-   if(g_totalPositionCap < 1)
-      g_totalPositionCap = 1;
-
    g_profileLabel = StringTrimLeft(StringTrimRight(InpProfileName));
    if(StringLen(g_profileLabel) == 0)
       g_profileLabel = "Default";
 
+   g_runId = BuildRunIdentifier();
+
    string safeProfile = SanitiseProfileName(InpProfileName);
    g_resultLogFileName = "TradeLog_" + safeProfile + ".csv";
+   g_parameterLogFileName = "TradeParams_" + safeProfile + "_" + g_runId + ".csv";
 
    UpdateDynamicPositionControls();
 
