@@ -629,6 +629,20 @@ string TrimString(string value)
   }
 
 //+------------------------------------------------------------------+
+//| Utility: strip UTF-8 BOM if present                               |
+//+------------------------------------------------------------------+
+string StripUtf8Bom(string value)
+  {
+   if(StringLen(value) == 0)
+      return(value);
+
+   if(StringGetChar(value, 0) == 0xFEFF)
+      return(StringSubstr(value, 1));
+
+   return(value);
+  }
+
+//+------------------------------------------------------------------+
 //| Utility: uppercase helper                                        |
 //+------------------------------------------------------------------+
 string ToUpper(const string value)
@@ -752,7 +766,11 @@ bool ParseBoolValue(const string text, const bool defaultValue)
 bool ParseDoubleValue(const string text, double &value)
   {
    string trimmed = TrimString(text);
+   trimmed = StripUtf8Bom(trimmed);
    if(StringLen(trimmed) == 0)
+      return(false);
+
+   if(!IsNumericString(trimmed))
       return(false);
 
    value = StrToDouble(trimmed);
@@ -765,7 +783,11 @@ bool ParseDoubleValue(const string text, double &value)
 bool ParseIntValue(const string text, int &value)
   {
    string trimmed = TrimString(text);
+   trimmed = StripUtf8Bom(trimmed);
    if(StringLen(trimmed) == 0)
+      return(false);
+
+   if(!IsIntegerString(trimmed))
       return(false);
 
    value = (int)StrToInteger(trimmed);
@@ -781,15 +803,56 @@ bool IsNumericString(const string text)
    if(len == 0)
       return(false);
 
+   bool hasDigit = false;
+   int  dotCount = 0;
+
    for(int i = 0; i < len; i++)
      {
       int ch = StringGetChar(text, i);
-      if((ch >= '0' && ch <= '9') || ch == '.' || ch == '+' || ch == '-')
+      if(ch >= '0' && ch <= '9')
+        {
+         hasDigit = true;
+         continue;
+        }
+      if(ch == '.')
+        {
+         dotCount++;
+         if(dotCount > 1)
+            return(false);
+         continue;
+        }
+      if((ch == '+' || ch == '-') && i == 0)
          continue;
       return(false);
      }
 
-   return(true);
+   return(hasDigit);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: check if string is integer numeric                       |
+//+------------------------------------------------------------------+
+bool IsIntegerString(const string text)
+  {
+   int len = StringLen(text);
+   if(len == 0)
+      return(false);
+
+   bool hasDigit = false;
+   for(int i = 0; i < len; i++)
+     {
+      int ch = StringGetChar(text, i);
+      if(ch >= '0' && ch <= '9')
+        {
+         hasDigit = true;
+         continue;
+        }
+      if((ch == '+' || ch == '-') && i == 0)
+         continue;
+      return(false);
+     }
+
+   return(hasDigit);
   }
 
 //+------------------------------------------------------------------+
@@ -1106,7 +1169,8 @@ void LogInputParameters(const string safeProfile)
 //+------------------------------------------------------------------+
 //| Apply CSV-derived values to band setting                         |
 //+------------------------------------------------------------------+
-void ApplyBandSetting(StrategyBandSetting &setting,
+bool ApplyBandSetting(StrategyBandSetting &setting,
+                      const string strategyLabel,
                       const string enableText,
                       const string modeText,
                       const string slText,
@@ -1117,19 +1181,21 @@ void ApplyBandSetting(StrategyBandSetting &setting,
                       const string trailingEnableText,
                       const string trailingAtrText,
                       const string trailingStepText,
-                      const string trailingMinStepText)
+                      const string trailingMinStepText,
+                      string &errorMessage)
   {
-   string trimmedEnable = TrimString(enableText);
-   string trimmedMode   = TrimString(modeText);
-   string trimmedSl     = TrimString(slText);
-   string trimmedTp     = TrimString(tpText);
-   string trimmedBeEn   = TrimString(breakEvenEnableText);
-   string trimmedBeAtr  = TrimString(breakEvenAtrText);
-    string trimmedBeOff  = TrimString(breakEvenOffsetText);
-   string trimmedTrEn   = TrimString(trailingEnableText);
-   string trimmedTrAtr  = TrimString(trailingAtrText);
-   string trimmedTrStep = TrimString(trailingStepText);
-   string trimmedTrMin  = TrimString(trailingMinStepText);
+   errorMessage    = "";
+   string trimmedEnable = StripUtf8Bom(TrimString(enableText));
+   string trimmedMode   = StripUtf8Bom(TrimString(modeText));
+   string trimmedSl     = StripUtf8Bom(TrimString(slText));
+   string trimmedTp     = StripUtf8Bom(TrimString(tpText));
+   string trimmedBeEn   = StripUtf8Bom(TrimString(breakEvenEnableText));
+   string trimmedBeAtr  = StripUtf8Bom(TrimString(breakEvenAtrText));
+   string trimmedBeOff  = StripUtf8Bom(TrimString(breakEvenOffsetText));
+   string trimmedTrEn   = StripUtf8Bom(TrimString(trailingEnableText));
+   string trimmedTrAtr  = StripUtf8Bom(TrimString(trailingAtrText));
+   string trimmedTrStep = StripUtf8Bom(TrimString(trailingStepText));
+   string trimmedTrMin  = StripUtf8Bom(TrimString(trailingMinStepText));
 
    bool hasContent = (StringLen(trimmedEnable) > 0 ||
                       StringLen(trimmedMode) > 0 ||
@@ -1145,7 +1211,7 @@ void ApplyBandSetting(StrategyBandSetting &setting,
    if(!hasContent)
      {
       setting.configured = false;
-      return;
+      return(true);
      }
 
    setting.configured              = true;
@@ -1168,34 +1234,98 @@ void ApplyBandSetting(StrategyBandSetting &setting,
    if(setting.mode == STOP_MODE_ATR)
      {
       double value = 0.0;
-      if(ParseDoubleValue(trimmedSl, value))
+      if(StringLen(trimmedSl) > 0)
+        {
+         if(!ParseDoubleValue(trimmedSl, value))
+           {
+            errorMessage = StringFormat("%s SL value '%s' is not numeric", strategyLabel, trimmedSl);
+            return(false);
+           }
          setting.atrStopMultiplier = value;
-      if(ParseDoubleValue(trimmedTp, value))
+        }
+      if(StringLen(trimmedTp) > 0)
+        {
+         if(!ParseDoubleValue(trimmedTp, value))
+           {
+            errorMessage = StringFormat("%s TP value '%s' is not numeric", strategyLabel, trimmedTp);
+            return(false);
+           }
          setting.atrTakeProfitMultiplier = value;
+        }
      }
    else if(setting.mode == STOP_MODE_PIPS)
      {
       int ivalue = 0;
-      if(ParseIntValue(trimmedSl, ivalue))
+      if(StringLen(trimmedSl) > 0)
+        {
+         if(!ParseIntValue(trimmedSl, ivalue))
+           {
+            errorMessage = StringFormat("%s SL value '%s' is not integer", strategyLabel, trimmedSl);
+            return(false);
+           }
          setting.stopLossPips = ivalue;
-      if(ParseIntValue(trimmedTp, ivalue))
+        }
+      if(StringLen(trimmedTp) > 0)
+        {
+         if(!ParseIntValue(trimmedTp, ivalue))
+           {
+            errorMessage = StringFormat("%s TP value '%s' is not integer", strategyLabel, trimmedTp);
+            return(false);
+           }
          setting.takeProfitPips = ivalue;
+        }
      }
 
    double parsedDouble = 0.0;
    int parsedInt       = 0;
-   if(ParseDoubleValue(trimmedBeAtr, parsedDouble))
+   if(StringLen(trimmedBeAtr) > 0)
+     {
+      if(!ParseDoubleValue(trimmedBeAtr, parsedDouble))
+        {
+         errorMessage = StringFormat("%s BE_ATR value '%s' is not numeric", strategyLabel, trimmedBeAtr);
+         return(false);
+        }
       setting.breakEvenAtrTrigger = parsedDouble;
-   if(ParseIntValue(trimmedBeOff, parsedInt))
+     }
+   if(StringLen(trimmedBeOff) > 0)
+     {
+      if(!ParseIntValue(trimmedBeOff, parsedInt))
+        {
+         errorMessage = StringFormat("%s BE_OFFSET value '%s' is not integer", strategyLabel, trimmedBeOff);
+         return(false);
+        }
       setting.breakEvenOffsetPips = parsedInt;
-   if(ParseDoubleValue(trimmedTrAtr, parsedDouble))
+     }
+   if(StringLen(trimmedTrAtr) > 0)
+     {
+      if(!ParseDoubleValue(trimmedTrAtr, parsedDouble))
+        {
+         errorMessage = StringFormat("%s TRAIL_ATR value '%s' is not numeric", strategyLabel, trimmedTrAtr);
+         return(false);
+        }
       setting.trailingAtrTrigger = parsedDouble;
-   if(ParseDoubleValue(trimmedTrStep, parsedDouble))
+     }
+   if(StringLen(trimmedTrStep) > 0)
+     {
+      if(!ParseDoubleValue(trimmedTrStep, parsedDouble))
+        {
+         errorMessage = StringFormat("%s TRAIL_STEP value '%s' is not numeric", strategyLabel, trimmedTrStep);
+         return(false);
+        }
       setting.trailingAtrStep = parsedDouble;
-   if(ParseIntValue(trimmedTrMin, parsedInt))
+     }
+   if(StringLen(trimmedTrMin) > 0)
+     {
+      if(!ParseIntValue(trimmedTrMin, parsedInt))
+        {
+         errorMessage = StringFormat("%s TRAIL_MIN value '%s' is not integer", strategyLabel, trimmedTrMin);
+         return(false);
+        }
       setting.trailingMinStepPips = parsedInt;
+     }
 
-   PrintFormat("ApplyBandSetting result: enableText='%s' -> %s modeText='%s' -> %s slText='%s' tpText='%s' beEnable='%s' beAtr='%s' beOffset='%s' trEnable='%s' trAtr='%s' trStep='%s' trMin='%s'",
+   PrintFormat("ApplyBandSetting result: strategy='%s' enableText='%s' -> %s modeText='%s' -> %s slText='%s' tpText='%s' beEnable='%s' beAtr='%s' beOffset='%s' trEnable='%s' trAtr='%s' trStep='%s' trMin='%s'",
+               strategyLabel,
                trimmedEnable,
                BoolToText(setting.enabled),
                trimmedMode,
@@ -1209,6 +1339,8 @@ void ApplyBandSetting(StrategyBandSetting &setting,
                trimmedTrAtr,
                trimmedTrStep,
                trimmedTrMin);
+
+   return(true);
   }
 
 //+------------------------------------------------------------------+
@@ -1263,8 +1395,10 @@ bool LoadAtrBandConfig(const string safeProfile)
       if(lastError == ERR_END_OF_FILE && StringLen(rawLine) == 0)
          break;
 
+      rawLine = StripUtf8Bom(rawLine);
       StringReplace(rawLine, "\r", "");
       rawLine = TrimString(rawLine);
+      rawLine = StripUtf8Bom(rawLine);
       if(StringLen(rawLine) == 0)
          continue;
       if(StringGetChar(rawLine, 0) == '#')
@@ -1275,7 +1409,11 @@ bool LoadAtrBandConfig(const string safeProfile)
       if(columnCount <= 0)
          continue;
 
-      string firstCell = TrimString(columns[0]);
+      for(int colIndex = 0; colIndex < columnCount; colIndex++)
+         columns[colIndex] = StripUtf8Bom(columns[colIndex]);
+
+      string firstCell = StripUtf8Bom(TrimString(columns[0]));
+      columns[0] = firstCell;
       if(!headerConsumed)
         {
          if(StringCompare(firstCell, "MINATR", false) == 0)
@@ -1288,17 +1426,17 @@ bool LoadAtrBandConfig(const string safeProfile)
 
             for(int col = 0; col < columnCount; col++)
               {
-               string header = TrimString(columns[col]);
-              for(int strat = 0; strat < STRAT_TOTAL; strat++)
-                {
-                 string prefix = g_strategyCsvPrefixes[strat];
-                 if(HeaderKeyEquals(header, prefix, "ENABLE"))
-                    strategyColumnIndex[(strat * columnsPerStrategy) + 0] = col;
-                 else if(HeaderKeyEquals(header, prefix, "MODE"))
-                    strategyColumnIndex[(strat * columnsPerStrategy) + 1] = col;
-                 else if(HeaderKeyEquals(header, prefix, "SL"))
-                    strategyColumnIndex[(strat * columnsPerStrategy) + 2] = col;
-                 else if(HeaderKeyEquals(header, prefix, "TP"))
+               string header = StripUtf8Bom(TrimString(columns[col]));
+               for(int strat = 0; strat < STRAT_TOTAL; strat++)
+                 {
+                  string prefix = g_strategyCsvPrefixes[strat];
+                  if(HeaderKeyEquals(header, prefix, "ENABLE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 0] = col;
+                  else if(HeaderKeyEquals(header, prefix, "MODE"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 1] = col;
+                  else if(HeaderKeyEquals(header, prefix, "SL"))
+                     strategyColumnIndex[(strat * columnsPerStrategy) + 2] = col;
+                  else if(HeaderKeyEquals(header, prefix, "TP"))
                      strategyColumnIndex[(strat * columnsPerStrategy) + 3] = col;
                   else if(HeaderKeyEquals(header, prefix, "BE_ENABLE"))
                      strategyColumnIndex[(strat * columnsPerStrategy) + 4] = col;
@@ -1317,7 +1455,7 @@ bool LoadAtrBandConfig(const string safeProfile)
                   else if(HeaderKeyEquals(header, prefix, "TRAIL_MIN") ||
                           HeaderKeyEquals(header, prefix, "TRAIL_MIN_STEP"))
                      strategyColumnIndex[(strat * columnsPerStrategy) + 10] = col;
-                }
+                 }
               }
 
             for(int strat = 0; strat < STRAT_TOTAL; strat++)
@@ -1338,13 +1476,27 @@ bool LoadAtrBandConfig(const string safeProfile)
       headerConsumed = true;
 
       double minAtrValue = 0.0;
-      if(!ParseDoubleValue(TrimString(columns[0]), minAtrValue))
+      if(!ParseDoubleValue(columns[0], minAtrValue))
+        {
+         PrintFormat("Skipping ATR band row due to invalid MINATR value '%s'. Line='%s'", columns[0], rawLine);
          continue;
+        }
 
       double maxAtrValue = DBL_MAX;
       bool hasMax = false;
       if(columnCount > 1)
-         hasMax = ParseDoubleValue(TrimString(columns[1]), maxAtrValue);
+        {
+         string maxText = StripUtf8Bom(TrimString(columns[1]));
+         if(StringLen(maxText) > 0)
+           {
+            if(!ParseDoubleValue(maxText, maxAtrValue))
+              {
+               PrintFormat("Skipping ATR band row due to invalid MAXATR value '%s'. Line='%s'", maxText, rawLine);
+               continue;
+              }
+            hasMax = true;
+           }
+        }
       if(!hasMax || maxAtrValue <= minAtrValue)
          maxAtrValue = DBL_MAX;
 
@@ -1352,11 +1504,13 @@ bool LoadAtrBandConfig(const string safeProfile)
                   columns[0],
                   (columnCount > 1 ? columns[1] : ""));
 
-      int index = ArraySize(g_bandConfigs);
-      ArrayResize(g_bandConfigs, index + 1);
-      InitBandConfig(g_bandConfigs[index]);
-      g_bandConfigs[index].minAtr = minAtrValue;
-      g_bandConfigs[index].maxAtr = maxAtrValue;
+      BandConfig tempConfig;
+      InitBandConfig(tempConfig);
+      tempConfig.minAtr = minAtrValue;
+      tempConfig.maxAtr = maxAtrValue;
+
+      bool   rowValid      = true;
+      string rowErrorCause = "";
 
       for(int strat = 0; strat < STRAT_TOTAL; strat++)
         {
@@ -1386,42 +1540,62 @@ bool LoadAtrBandConfig(const string safeProfile)
          int trMinIndex    = strategyColumnIndex[baseOffset + 10];
 
          if(enableIndex >= 0 && enableIndex < columnCount)
-            enableText = TrimString(columns[enableIndex]);
+            enableText = StripUtf8Bom(TrimString(columns[enableIndex]));
          if(modeIndex >= 0 && modeIndex < columnCount)
-            modeText = TrimString(columns[modeIndex]);
+            modeText = StripUtf8Bom(TrimString(columns[modeIndex]));
          if(slIndex >= 0 && slIndex < columnCount)
-            slText = TrimString(columns[slIndex]);
+            slText = StripUtf8Bom(TrimString(columns[slIndex]));
          if(tpIndex >= 0 && tpIndex < columnCount)
-            tpText = TrimString(columns[tpIndex]);
+            tpText = StripUtf8Bom(TrimString(columns[tpIndex]));
          if(beEnableIndex >= 0 && beEnableIndex < columnCount)
-            beEnableText = TrimString(columns[beEnableIndex]);
+            beEnableText = StripUtf8Bom(TrimString(columns[beEnableIndex]));
          if(beAtrIndex >= 0 && beAtrIndex < columnCount)
-            beAtrText = TrimString(columns[beAtrIndex]);
+            beAtrText = StripUtf8Bom(TrimString(columns[beAtrIndex]));
          if(beOffsetIndex >= 0 && beOffsetIndex < columnCount)
-            beOffsetText = TrimString(columns[beOffsetIndex]);
+            beOffsetText = StripUtf8Bom(TrimString(columns[beOffsetIndex]));
          if(trEnableIndex >= 0 && trEnableIndex < columnCount)
-            trEnableText = TrimString(columns[trEnableIndex]);
+            trEnableText = StripUtf8Bom(TrimString(columns[trEnableIndex]));
          if(trAtrIndex >= 0 && trAtrIndex < columnCount)
-            trAtrText = TrimString(columns[trAtrIndex]);
+            trAtrText = StripUtf8Bom(TrimString(columns[trAtrIndex]));
          if(trStepIndex >= 0 && trStepIndex < columnCount)
-            trStepText = TrimString(columns[trStepIndex]);
+            trStepText = StripUtf8Bom(TrimString(columns[trStepIndex]));
          if(trMinIndex >= 0 && trMinIndex < columnCount)
-            trMinText = TrimString(columns[trMinIndex]);
+            trMinText = StripUtf8Bom(TrimString(columns[trMinIndex]));
 
-         ApplyBandSetting(g_bandConfigs[index].strategySettings[strat],
-                          enableText,
-                          modeText,
-                          slText,
-                          tpText,
-                          beEnableText,
-                          beAtrText,
-                          beOffsetText,
-                          trEnableText,
-                          trAtrText,
-                          trStepText,
-                          trMinText);
+         string parseError = "";
+         if(!ApplyBandSetting(tempConfig.strategySettings[strat],
+                              g_strategyCsvPrefixes[strat],
+                              enableText,
+                              modeText,
+                              slText,
+                              tpText,
+                              beEnableText,
+                              beAtrText,
+                              beOffsetText,
+                              trEnableText,
+                              trAtrText,
+                              trStepText,
+                              trMinText,
+                              parseError))
+           {
+            rowValid      = false;
+            rowErrorCause = parseError;
+            break;
+           }
         }
 
+      if(!rowValid)
+        {
+         PrintFormat("Skipping ATR band row for MINATR '%s' due to %s. Line='%s'",
+                     columns[0],
+                     rowErrorCause,
+                     rawLine);
+         continue;
+        }
+
+      int index = ArraySize(g_bandConfigs);
+      ArrayResize(g_bandConfigs, index + 1);
+      g_bandConfigs[index] = tempConfig;
       loadedRows++;
      }
 
