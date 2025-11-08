@@ -69,6 +69,7 @@ input int    InpMaxPositionsPerStrategy = 1;
 input double InpMultiPositionEquityThreshold = 0.0;
 input double InpLotReductionEquityThreshold  = 0.0;
 input double InpLotReductionFactor           = 1.0;
+input int    InpMagicPrefix                 = 10100;
 
 //--- strategy meta definitions
 enum StrategyIndex
@@ -159,9 +160,11 @@ struct StrategyBandSetting
    int      stopLossPips;
    int      takeProfitPips;
    bool     breakEvenEnabled;
+   bool     breakEvenEnabledSpecified;
    double   breakEvenAtrTrigger;
    int      breakEvenOffsetPips;
    bool     trailingEnabled;
+   bool     trailingEnabledSpecified;
    double   trailingAtrTrigger;
    double   trailingAtrStep;
    int      trailingMinStepPips;
@@ -178,6 +181,35 @@ BandConfig g_bandConfigs[];
 bool       g_bandConfigLoaded = false;
 string     g_bandConfigPath   = "";
 string     g_strategyCsvPrefixes[] = {"MA", "RSI", "CCI", "MACD", "STOCH"};
+const int  kStrategyMagicOffsets[STRAT_TOTAL] = {1, 2, 3, 4, 5};
+const int  kLegacyStrategyMagics[STRAT_TOTAL] = {10101, 10201, 10301, 10401, 10501};
+const long kMaxIntValue = 2147483647;
+
+//+------------------------------------------------------------------+
+//| Utility: derive magic number for strategy                        |
+//+------------------------------------------------------------------+
+int GetStrategyMagic(const StrategyIndex index)
+  {
+   if(index < 0 || index >= STRAT_TOTAL)
+      return(InpMagicPrefix);
+
+   int offset = kStrategyMagicOffsets[index];
+   return(InpMagicPrefix + offset);
+  }
+
+//+------------------------------------------------------------------+
+//| Utility: get maximum configured magic offset                     |
+//+------------------------------------------------------------------+
+int GetMaximumMagicOffset()
+  {
+   int maxOffset = 0;
+   for(int i = 0; i < STRAT_TOTAL; i++)
+     {
+      if(kStrategyMagicOffsets[i] > maxOffset)
+         maxOffset = kStrategyMagicOffsets[i];
+     }
+   return(maxOffset);
+  }
 
 //+------------------------------------------------------------------+
 //| Utility: sanitise profile name for file usage                    |
@@ -714,9 +746,11 @@ void InitStrategyBandSetting(StrategyBandSetting &setting)
    setting.stopLossPips             = -1;
    setting.takeProfitPips           = -1;
    setting.breakEvenEnabled         = false;
+   setting.breakEvenEnabledSpecified = false;
    setting.breakEvenAtrTrigger      = -1.0;
    setting.breakEvenOffsetPips      = -1;
    setting.trailingEnabled          = false;
+   setting.trailingEnabledSpecified = false;
    setting.trailingAtrTrigger       = -1.0;
    setting.trailingAtrStep          = -1.0;
    setting.trailingMinStepPips      = -1;
@@ -992,24 +1026,44 @@ void LogBandConfigurations()
   }
 
 //+------------------------------------------------------------------+
+//| Utility: open parameter log handle (truncate or append)          |
+//+------------------------------------------------------------------+
+int OpenParameterLogFile(const bool append)
+  {
+   if(StringLen(g_parameterLogFileName) == 0)
+      return(INVALID_HANDLE);
+
+   int modeFlags = FILE_CSV | FILE_SHARE_READ;
+   if(append)
+      modeFlags |= FILE_READ | FILE_WRITE;
+   else
+      modeFlags |= FILE_WRITE;
+
+   int handle = FileOpen(g_parameterLogFileName, modeFlags, ',');
+   if(handle == INVALID_HANDLE)
+     {
+      Print("Failed to open parameter log file ", g_parameterLogFileName,
+            " (append=", BoolToText(append), ") . Error: ", GetLastError());
+      return(INVALID_HANDLE);
+     }
+
+   if(append)
+      FileSeek(handle, 0, SEEK_END);
+
+   return(handle);
+  }
+
+//+------------------------------------------------------------------+
 //| Log helper: write parameter snapshot to dedicated CSV            |
 //+------------------------------------------------------------------+
 void WriteParameterSnapshot(const string safeProfile)
   {
-   if(StringLen(g_parameterLogFileName) == 0)
-      return;
-
-   int handle = FileOpen(g_parameterLogFileName,
-                         FILE_CSV | FILE_WRITE | FILE_SHARE_READ,
-                         ',');
+   int handle = OpenParameterLogFile(false);
    if(handle == INVALID_HANDLE)
-     {
-      Print("Failed to open parameter log file ", g_parameterLogFileName,
-            ". Error: ", GetLastError());
       return;
-     }
 
    FileWrite(handle, "param", "value");
+   FileWrite(handle, "section", "initial_inputs");
    FileWrite(handle, "run_id", g_runId);
    FileWrite(handle,
              "timestamp",
@@ -1093,6 +1147,99 @@ void WriteParameterSnapshot(const string safeProfile)
              "lot_reduction_equity_threshold",
              DoubleToString(InpLotReductionEquityThreshold, 4));
    FileWrite(handle, "lot_reduction_factor", DoubleToString(InpLotReductionFactor, 4));
+   FileWrite(handle, "magic_prefix", IntegerToString(InpMagicPrefix));
+   FileWrite(handle, "magic_ma", IntegerToString(GetStrategyMagic(STRAT_MA)));
+   FileWrite(handle, "magic_rsi", IntegerToString(GetStrategyMagic(STRAT_RSI)));
+   FileWrite(handle, "magic_cci", IntegerToString(GetStrategyMagic(STRAT_CCI)));
+   FileWrite(handle, "magic_macd", IntegerToString(GetStrategyMagic(STRAT_MACD)));
+   FileWrite(handle, "magic_stoch", IntegerToString(GetStrategyMagic(STRAT_STOCH)));
+
+   FileClose(handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Log helper: dump loaded ATR band config into parameter log       |
+//+------------------------------------------------------------------+
+void AppendBandConfigSnapshot()
+  {
+   if(!g_bandConfigLoaded)
+      return;
+
+   int handle = OpenParameterLogFile(true);
+   if(handle == INVALID_HANDLE)
+      return;
+
+   FileWrite(handle, "section", "atr_band_config");
+   FileWrite(handle, "band_file", g_bandConfigPath);
+
+   int totalBands = ArraySize(g_bandConfigs);
+   FileWrite(handle, "band_count", IntegerToString(totalBands));
+
+   for(int bandIndex = 0; bandIndex < totalBands; bandIndex++)
+     {
+      BandConfig band = g_bandConfigs[bandIndex];
+      string bandPrefix = "band[" + IntegerToString(bandIndex) + "]";
+      FileWrite(handle,
+                bandPrefix + ".min_atr",
+                DoubleToString(band.minAtr, 6));
+
+      string maxAtrText = (band.maxAtr == DBL_MAX
+                           ? "infinity"
+                           : DoubleToString(band.maxAtr, 6));
+      FileWrite(handle, bandPrefix + ".max_atr", maxAtrText);
+
+      for(int strat = 0; strat < STRAT_TOTAL; strat++)
+        {
+         StrategyBandSetting setting = band.strategySettings[strat];
+         string stratLabel = g_strategyCsvPrefixes[strat];
+         string stratPrefix = bandPrefix + "." + stratLabel;
+
+         FileWrite(handle,
+                   stratPrefix + ".configured",
+                   BoolToText(setting.configured));
+         if(!setting.configured)
+            continue;
+
+         FileWrite(handle, stratPrefix + ".enabled", BoolToText(setting.enabled));
+         FileWrite(handle, stratPrefix + ".mode", StopModeToText(setting.mode));
+
+         FileWrite(handle,
+                   stratPrefix + ".atr_stop_multiplier",
+                   DoubleToString(setting.atrStopMultiplier, 6));
+         FileWrite(handle,
+                   stratPrefix + ".atr_takeprofit_multiplier",
+                   DoubleToString(setting.atrTakeProfitMultiplier, 6));
+         FileWrite(handle,
+                   stratPrefix + ".stop_loss_pips",
+                   IntegerToString(setting.stopLossPips));
+         FileWrite(handle,
+                   stratPrefix + ".take_profit_pips",
+                   IntegerToString(setting.takeProfitPips));
+
+         FileWrite(handle,
+                   stratPrefix + ".break_even_enabled",
+                   BoolToText(setting.breakEvenEnabled));
+         FileWrite(handle,
+                   stratPrefix + ".break_even_atr",
+                   DoubleToString(setting.breakEvenAtrTrigger, 6));
+         FileWrite(handle,
+                   stratPrefix + ".break_even_offset_pips",
+                   IntegerToString(setting.breakEvenOffsetPips));
+
+         FileWrite(handle,
+                   stratPrefix + ".trailing_enabled",
+                   BoolToText(setting.trailingEnabled));
+         FileWrite(handle,
+                   stratPrefix + ".trailing_atr_trigger",
+                   DoubleToString(setting.trailingAtrTrigger, 6));
+         FileWrite(handle,
+                   stratPrefix + ".trailing_atr_step",
+                   DoubleToString(setting.trailingAtrStep, 6));
+         FileWrite(handle,
+                   stratPrefix + ".trailing_min_step_pips",
+                   IntegerToString(setting.trailingMinStepPips));
+        }
+     }
 
    FileClose(handle);
   }
@@ -1163,6 +1310,13 @@ void LogInputParameters(const string safeProfile)
    PrintFormat("Lot reduction: equityThreshold=%.2f factor=%.2f",
                InpLotReductionEquityThreshold,
                InpLotReductionFactor);
+   PrintFormat("Magic numbers: prefix=%d MA=%d RSI=%d CCI=%d MACD=%d STOCH=%d",
+               InpMagicPrefix,
+               GetStrategyMagic(STRAT_MA),
+               GetStrategyMagic(STRAT_RSI),
+               GetStrategyMagic(STRAT_CCI),
+               GetStrategyMagic(STRAT_MACD),
+               GetStrategyMagic(STRAT_STOCH));
    WriteParameterSnapshot(safeProfile);
  }
 
@@ -1223,10 +1377,12 @@ bool ApplyBandSetting(StrategyBandSetting &setting,
    setting.atrTakeProfitMultiplier = -1.0;
    setting.stopLossPips            = -1;
    setting.takeProfitPips          = -1;
-   setting.breakEvenEnabled        = ParseBoolValue(trimmedBeEn, false);
+   setting.breakEvenEnabled        = false;
+   setting.breakEvenEnabledSpecified = false;
    setting.breakEvenAtrTrigger     = -1.0;
    setting.breakEvenOffsetPips     = -1;
-   setting.trailingEnabled         = ParseBoolValue(trimmedTrEn, false);
+   setting.trailingEnabled         = false;
+   setting.trailingEnabledSpecified = false;
    setting.trailingAtrTrigger      = -1.0;
    setting.trailingAtrStep         = -1.0;
    setting.trailingMinStepPips     = -1;
@@ -1278,6 +1434,11 @@ bool ApplyBandSetting(StrategyBandSetting &setting,
 
    double parsedDouble = 0.0;
    int parsedInt       = 0;
+   if(StringLen(trimmedBeEn) > 0)
+     {
+      setting.breakEvenEnabled = ParseBoolValue(trimmedBeEn, false);
+      setting.breakEvenEnabledSpecified = true;
+     }
    if(StringLen(trimmedBeAtr) > 0)
      {
       if(!ParseDoubleValue(trimmedBeAtr, parsedDouble))
@@ -1295,6 +1456,11 @@ bool ApplyBandSetting(StrategyBandSetting &setting,
          return(false);
         }
       setting.breakEvenOffsetPips = parsedInt;
+     }
+   if(StringLen(trimmedTrEn) > 0)
+     {
+      setting.trailingEnabled = ParseBoolValue(trimmedTrEn, false);
+      setting.trailingEnabledSpecified = true;
      }
    if(StringLen(trimmedTrAtr) > 0)
      {
@@ -1668,6 +1834,11 @@ int FindStrategyIndexByMagic(const int magic)
       if(g_strategies[i].magic == magic)
          return(i);
      }
+   for(int i = 0; i < STRAT_TOTAL; i++)
+     {
+      if(kLegacyStrategyMagics[i] == magic)
+         return(i);
+     }
    return(-1);
   }
 
@@ -1811,11 +1982,16 @@ void InitialiseTradeMetadata()
          InitStrategyBandSetting(bandSetting);
          if(ResolveBandSetting((StrategyIndex)stratIndex, entryAtrValue, bandSetting))
            {
+            if(bandSetting.breakEvenEnabledSpecified)
+               breakEvenEnabled = bandSetting.breakEvenEnabled;
+
             if(bandSetting.breakEvenAtrTrigger >= 0.0)
                breakEvenAtrTrigger = bandSetting.breakEvenAtrTrigger;
             if(bandSetting.breakEvenOffsetPips >= 0)
                breakEvenOffset = bandSetting.breakEvenOffsetPips;
-            breakEvenEnabled = bandSetting.breakEvenEnabled;
+
+            if(bandSetting.trailingEnabledSpecified)
+               trailingEnabled = bandSetting.trailingEnabled;
 
             if(bandSetting.trailingAtrTrigger >= 0.0)
                trailingAtrTrigger = bandSetting.trailingAtrTrigger;
@@ -1823,7 +1999,6 @@ void InitialiseTradeMetadata()
                trailingAtrStep = bandSetting.trailingAtrStep;
             if(bandSetting.trailingMinStepPips >= 0)
                trailingMinStep = bandSetting.trailingMinStepPips;
-            trailingEnabled = bandSetting.trailingEnabled;
            }
         }
 
@@ -2169,12 +2344,14 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
          if(bandSetting.takeProfitPips >= 0)
             takeProfitPips = bandSetting.takeProfitPips;
         }
-      breakEvenEnabled = bandSetting.breakEvenEnabled;
+      if(bandSetting.breakEvenEnabledSpecified)
+         breakEvenEnabled = bandSetting.breakEvenEnabled;
       if(bandSetting.breakEvenAtrTrigger >= 0.0)
          breakEvenAtrTrigger = bandSetting.breakEvenAtrTrigger;
       if(bandSetting.breakEvenOffsetPips >= 0)
          breakEvenOffsetPips = bandSetting.breakEvenOffsetPips;
-      trailingEnabled = bandSetting.trailingEnabled;
+      if(bandSetting.trailingEnabledSpecified)
+         trailingEnabled = bandSetting.trailingEnabled;
       if(bandSetting.trailingAtrTrigger >= 0.0)
          trailingAtrTrigger = bandSetting.trailingAtrTrigger;
       if(bandSetting.trailingAtrStep >= 0.0)
@@ -2200,8 +2377,9 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
             dist = minStopDistance;
          sl = (cmd == OP_BUY ? price - dist : price + dist);
          sl = NormalizeDouble(sl, Digits);
-         if(pip > 0.0)
-            stopDistancePips = dist / pip;
+         double pipDivisor = (pip > 0.0 ? pip : Point);
+         if(pipDivisor > 0.0)
+            stopDistancePips = dist / pipDivisor;
         }
 
       if(atrTakeProfitMultiplier > 0.0)
@@ -2240,18 +2418,24 @@ TradeAttemptResult ExecuteEntry(const StrategyState &state,
 
    if(InpUseRiskBasedLots)
      {
-      double riskLots = CalculateRiskBasedLots(stopDistancePips);
-      if(riskLots > 0.0)
+      if(stopDistancePips <= 0.0)
         {
-         requestedLots = riskLots;
-        }
-      else
-        {
-         PrintFormat("Risk-based lot calculation unavailable for %s (stopPips=%.2f). Using fixed lots.",
+         PrintFormat("Risk-based lot sizing skipped for %s because stop distance is %.2f pips.",
                      state.name,
                      stopDistancePips);
-         requestedLots = InpLots;
+         return(TRADE_ATTEMPT_SKIPPED);
         }
+
+      double riskLots = CalculateRiskBasedLots(stopDistancePips);
+      if(riskLots <= 0.0)
+        {
+         PrintFormat("Risk-based lot calculation failed for %s (stopPips=%.2f). Entry skipped.",
+                     state.name,
+                     stopDistancePips);
+         return(TRADE_ATTEMPT_SKIPPED);
+        }
+
+      requestedLots = riskLots;
      }
 
    normalizedLots = NormalizeLotSize(requestedLots);
@@ -2522,14 +2706,16 @@ void ProcessStrategy(StrategyIndex index, const double atrValue)
                                              indicatorValue,
                                              hasBandSetting,
                                              bandSetting);
-   if(attempt == TRADE_ATTEMPT_PLACED ||
-      attempt == TRADE_ATTEMPT_CONSUMED)
+   bool signalConsumed = (attempt == TRADE_ATTEMPT_PLACED ||
+                          attempt == TRADE_ATTEMPT_CONSUMED);
+   if(signalConsumed)
      {
       state.lastBarTime  = signalBarTime;
       state.lastDirection = direction;
-      state.lastTradeTime = TimeCurrent();
-     g_strategies[index] = state;
-    }
+      if(attempt == TRADE_ATTEMPT_PLACED)
+         state.lastTradeTime = TimeCurrent();
+      g_strategies[index] = state;
+     }
   }
 
 string DetermineExitReason(const int ticket,
@@ -2781,9 +2967,12 @@ void ManageOpenPositions(const double atrValue)
          metaIndex = FindTradeMetadataIndex(OrderTicket());
         }
 
+      TradeMetadata meta;
+      bool hasMeta = false;
       if(metaIndex >= 0)
         {
-         TradeMetadata meta = g_tradeMetadata[metaIndex];
+         meta = g_tradeMetadata[metaIndex];
+         hasMeta = true;
          breakEvenEnabled     = meta.breakEvenEnabled;
          breakEvenAtrTrigger  = meta.breakEvenAtrTrigger;
          breakEvenOffsetPips  = meta.breakEvenOffsetPips;
@@ -2796,16 +2985,24 @@ void ManageOpenPositions(const double atrValue)
       if(!breakEvenEnabled && !trailingEnabled)
          continue;
 
-      double breakEvenTriggerDistance = (breakEvenAtrTrigger > 0.0 ? atrValue * breakEvenAtrTrigger : 0.0);
-      double trailingTriggerDistance  = (trailingAtrTrigger > 0.0 ? atrValue * trailingAtrTrigger : 0.0);
-      double trailingStepDistance     = (trailingAtrStep > 0.0 ? atrValue * trailingAtrStep : 0.0);
+      double atrForStopLogic = atrValue;
+      if(hasMeta && meta.entryAtr > 0.0)
+         atrForStopLogic = meta.entryAtr;
+
+      double breakEvenTriggerDistance = (breakEvenAtrTrigger > 0.0 ? atrForStopLogic * breakEvenAtrTrigger : 0.0);
+      double trailingTriggerDistance  = (trailingAtrTrigger > 0.0 ? atrForStopLogic * trailingAtrTrigger : 0.0);
+      double trailingStepDistance     = (trailingAtrStep > 0.0 ? atrForStopLogic * trailingAtrStep : 0.0);
       double trailingMinStepDistance  = trailingMinStepPips * pip;
       if(trailingMinStepDistance <= 0.0)
          trailingMinStepDistance = pip;
 
+      int normalizedBreakEvenOffset = breakEvenOffsetPips;
+      if(normalizedBreakEvenOffset < 0)
+         normalizedBreakEvenOffset = 0;
+
       double breakEvenStop = (orderType == OP_BUY
-                              ? openPrice + breakEvenOffsetPips * pip
-                              : openPrice - breakEvenOffsetPips * pip);
+                              ? openPrice + normalizedBreakEvenOffset * pip
+                              : openPrice - normalizedBreakEvenOffset * pip);
       bool breakEvenAvailable = false;
 
       if(breakEvenEnabled &&
@@ -2851,6 +3048,26 @@ void ManageOpenPositions(const double atrValue)
             breakEvenAvailable = true;
         }
 
+      double trailingProtectStop = breakEvenStop;
+      double trailingProtectDistance = normalizedBreakEvenOffset * pip;
+      bool trailingProtectUnlocked = breakEvenAvailable;
+
+      if(!trailingProtectUnlocked)
+        {
+         if(orderType == OP_BUY && currentStop >= trailingProtectStop - 1e-8)
+            trailingProtectUnlocked = true;
+         if(orderType == OP_SELL && currentStop <= trailingProtectStop + 1e-8)
+            trailingProtectUnlocked = true;
+        }
+
+      if(!trailingProtectUnlocked && !breakEvenEnabled)
+        {
+         if(trailingProtectDistance <= 0.0)
+            trailingProtectUnlocked = (profitDistance >= minStopDistance - 1e-8);
+         else
+            trailingProtectUnlocked = (profitDistance >= trailingProtectDistance - 1e-8);
+        }
+
       if(trailingEnabled &&
          trailingTriggerDistance > 0.0 &&
          trailingStepDistance > 0.0 &&
@@ -2865,8 +3082,8 @@ void ManageOpenPositions(const double atrValue)
                continue;
 
             double trailingFloor = openPrice;
-            if(breakEvenAvailable)
-               trailingFloor = MathMax(trailingFloor, breakEvenStop);
+            if(trailingProtectUnlocked)
+               trailingFloor = MathMax(trailingFloor, trailingProtectStop);
 
             if(trailingFloor > maxStop + 1e-8)
                continue;
@@ -2900,8 +3117,8 @@ void ManageOpenPositions(const double atrValue)
            {
             double minStop = currentPrice + minStopDistance;
             double trailingCeiling = openPrice;
-            if(breakEvenAvailable)
-               trailingCeiling = MathMin(trailingCeiling, breakEvenStop);
+            if(trailingProtectUnlocked)
+               trailingCeiling = MathMin(trailingCeiling, trailingProtectStop);
 
             if(trailingCeiling < minStop - 1e-8)
                continue;
@@ -3110,9 +3327,23 @@ int OnInit()
      return(INIT_PARAMETERS_INCORRECT);
     }
 
+  if(InpMagicPrefix < 0)
+    {
+     Print("Magic prefix must be zero or positive.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
+  int maxMagicOffset = GetMaximumMagicOffset();
+  long projectedMagic = (long)InpMagicPrefix + (long)maxMagicOffset;
+  if(projectedMagic > kMaxIntValue)
+    {
+     Print("Magic prefix is too large. Resulting magic numbers exceed supported range.");
+     return(INIT_PARAMETERS_INCORRECT);
+    }
+
   g_strategies[STRAT_MA].name  = "MA_CROSS";
    g_strategies[STRAT_MA].comment = "MA";
-   g_strategies[STRAT_MA].magic = 10101;
+   g_strategies[STRAT_MA].magic = GetStrategyMagic(STRAT_MA);
    g_strategies[STRAT_MA].enabled = InpEnableMA;
    g_strategies[STRAT_MA].lastBarTime = 0;
    g_strategies[STRAT_MA].lastDirection = 0;
@@ -3122,7 +3353,7 @@ int OnInit()
 
    g_strategies[STRAT_RSI].name  = "RSI";
    g_strategies[STRAT_RSI].comment = "RSI";
-   g_strategies[STRAT_RSI].magic = 10201;
+   g_strategies[STRAT_RSI].magic = GetStrategyMagic(STRAT_RSI);
    g_strategies[STRAT_RSI].enabled = InpEnableRSI;
    g_strategies[STRAT_RSI].lastBarTime = 0;
    g_strategies[STRAT_RSI].lastDirection = 0;
@@ -3132,7 +3363,7 @@ int OnInit()
 
    g_strategies[STRAT_CCI].name  = "CCI";
    g_strategies[STRAT_CCI].comment = "CCI";
-   g_strategies[STRAT_CCI].magic = 10301;
+   g_strategies[STRAT_CCI].magic = GetStrategyMagic(STRAT_CCI);
    g_strategies[STRAT_CCI].enabled = InpEnableCCI;
    g_strategies[STRAT_CCI].lastBarTime = 0;
    g_strategies[STRAT_CCI].lastDirection = 0;
@@ -3142,7 +3373,7 @@ int OnInit()
 
    g_strategies[STRAT_MACD].name  = "MACD";
    g_strategies[STRAT_MACD].comment = "MACD";
-   g_strategies[STRAT_MACD].magic = 10401;
+   g_strategies[STRAT_MACD].magic = GetStrategyMagic(STRAT_MACD);
    g_strategies[STRAT_MACD].enabled = InpEnableMACD;
    g_strategies[STRAT_MACD].lastBarTime = 0;
    g_strategies[STRAT_MACD].lastDirection = 0;
@@ -3152,7 +3383,7 @@ int OnInit()
 
    g_strategies[STRAT_STOCH].name  = "STOCH";
    g_strategies[STRAT_STOCH].comment = "STOCH";
-   g_strategies[STRAT_STOCH].magic = 10501;
+   g_strategies[STRAT_STOCH].magic = GetStrategyMagic(STRAT_STOCH);
    g_strategies[STRAT_STOCH].enabled = InpEnableStoch;
    g_strategies[STRAT_STOCH].lastBarTime = 0;
    g_strategies[STRAT_STOCH].lastDirection = 0;
@@ -3183,7 +3414,10 @@ int OnInit()
 
    bool configLoaded = LoadAtrBandConfig(safeProfile);
    if(configLoaded)
+     {
       LogBandConfigurations();
+      AppendBandConfigSnapshot();
+     }
    else
      {
       if(InpUseAtrBandConfig)

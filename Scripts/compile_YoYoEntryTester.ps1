@@ -1,9 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
-$metaEditor = 'D:\Rakuten_MT4\metaeditor.exe'
-$sourceMq4 = 'D:\EA開発2025_10_26\YoYoEA_NEXT\MQL4\Experts\YoYoEntryTester.mq4'
-$targetMq4 = 'D:\Rakuten_MT4\MQL4\Experts\YoYoEntryTester.mq4'
-$logDir     = 'D:\EA開発2025_10_26\CompileLog'
+$metaEditor = '/mnt/d/Rakuten_MT4/metaeditor.exe'
+$sourceMq4 = '/home/anyo_/workspace/YoYoEA_NEXT/YoYoEA_NEXT/MQL4/Experts/YoYoEntryTester.mq4'
+$targetMq4 = '/mnt/d/Rakuten_MT4/MQL4/Experts/YoYoEntryTester.mq4'
+$logDir     = '/home/anyo_/workspace/Compile_log'
+
+function Convert-ToWindowsPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue
+    )
+
+    if ($PathValue -match '^/mnt/([a-zA-Z])/(.*)$') {
+        $drive = $matches[1].ToUpper()
+        $relative = $matches[2] -replace '/', '\'
+        return ("{0}:\{1}" -f $drive, $relative)
+    }
+
+    return $PathValue
+}
 
 if (-not (Test-Path -LiteralPath $metaEditor)) {
     throw "MetaEditor を検出できません: $metaEditor"
@@ -17,10 +32,13 @@ Copy-Item -LiteralPath $sourceMq4 -Destination $targetMq4 -Force
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $logFile   = Join-Path $logDir "YoYoEntryTester_$timestamp.log"
 
+$targetMq4ForMetaEditor = Convert-ToWindowsPath -PathValue $targetMq4
+$logFileForMetaEditor = Convert-ToWindowsPath -PathValue $logFile
+
 $arguments = @(
     '/portable'
-    "/compile:$targetMq4"
-    "/log:$logFile"
+    "/compile:$targetMq4ForMetaEditor"
+    "/log:$logFileForMetaEditor"
 )
 
 $process = Start-Process -FilePath $metaEditor -ArgumentList $arguments -Wait -PassThru

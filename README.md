@@ -39,6 +39,21 @@ YoYoEA_NEXT は複数ストラテジー（MA、RSI、CCI、MACD、Stochastic）�
 - 取引サーバーのタイムゾーンと `InpSession*` の設定が一致しているか事前に確認してください。
 - ATR バンド CSV の設定が不足している場合、デフォルト値にフォールバックします。テスト開始時のログで読み込み結果をチェックすることをおすすめします。
 
+### 現在の標準設定（Prod）
+- **設定ファイル**: `YoYoEA_NEXT/YoYoEA_NEXT/Config/AtrBandConfig_YoYo_Next_v124_Prod.csv`
+  - 低ATR帯（0.05-0.10）の Stoch は BE=1.0/1.3ATR & Trail=0.30/0.40ATR で安定寄りに調整。
+  - CCI は 0.12 以上の帯域のみで稼働し、0.12-0.20 は SL=3.3ATR / TP=5.9ATR / Trail step 0.90。
+  - MA/RSI/MACD は v4b 相当のバランス設定で、Prod ログでは合計 +2,115 USD（2025-01 期間）を記録。
+- **テストログ**
+  - `TradeLog_v124/AtrBandConfig_YoYo_Next_v124_Prod.csv.csv`: 2025-01-01 検証（基準期）。
+  - `TradeLog_v124/AtrBandConfig_YoYo_Next_v124_Prod_202506.csv`: 2025-06 期間の比較ログ。短期サンプルとして利用。
+- 上記ログの集計は `analysis/atr_indicator_band_summary_YYYYMM_AtrBandConfig_YoYo_Next_v124_Prod.csv` に保存しています。異なる期間を比較する場合は同ファイルを追加作成し、Notion「YoYoEntryTester 帯域×指標サマリ」に必要な行だけ登録してください。
+
+### BT/運用手順のテンプレート
+1. `AtrBandConfig_YoYo_Next_v124_Prod.csv` を `MQL4/Files` へコピーし、Strategy Tester の `InpAtrBandConfigFile` で参照。
+2. テスト完了後は `TradeLog_<Profile>.csv` を `TradeLog_v124/` に保管し、`analysis/atr_indicator_band_summary_<期間>_...csv` を生成。
+3. 結果を Notion（データベース: *YoYoEntryTester 帯域×指標サマリ*）へ追記し、主要ハイライトを `Memo/memo.txt` にISO時刻で記録。
+
 ## ATRバンドCSVフォーマット
 - CSV は『minAtr,maxAtr,<Strategy>_Enable,<Strategy>_Mode,<Strategy>_SL,<Strategy>_TP』の列を戦略ごとに持ちます。
 - デフォルトの列順: MA / RSI / CCI / MACD / STOCH。見出し名が一致すれば順番入れ替えや一部省略も可能。

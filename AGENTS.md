@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## CODEX
+-会話は日本語でお願いします。
+-実施したアクションはタイムスタンプ付きで/home/anyo_/workspace/YoYoEA_NEXT/Memo/memo.txtに記録しアップデートしてください。アクション内容、結果を詳細記録お願いします。日本語　UTF-8
+-次のアクションがある場合はメモに記録してください。コード開発以外の会話は記録しなくていいです。
+-コード改良を実施した際には、ある程度まとまった時点でコミットメッセージとともに提案してください。
+
 ## プロジェクト構成とモジュール配置
 EA本体は `YoYoEA_NEXT/MQL4/Experts/YoYoEntryTester.mq4` に配置されています。追加のMQL4モジュールを置く場合も同ディレクトリにまとめ、共有状態は既存の `g_*` グローバル変数を通じて扱ってください。ATRバンド設定CSVは `YoYoEA_NEXT/Config` に保存し、`{PROFILE}` プレースホルダーが `InpProfileName` と連動します。旧設定は `Config/archive` に退避済みです。ストラテジーテスター用プリセット（.set）は `priset/` で BETR_* 命名に統一し、運用スクリプトは `Scripts/` 配下に格納します。作業ログは `Memo/memo.txt` にISO形式タイムスタンプと日本語で追記することをルールとします。
 
